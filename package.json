@@ -1,0 +1,19 @@
+{
+  "name": "opencode-telegram",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Telegram integration for OpenCode - notifications, permission handling, and two-way communication",
+  "scripts": {
+    "dev": "bun --watch src/test-plugin.ts",
+    "test:send": "bun run src/test-send.ts",
+    "test:webhook": "bun run src/webhook-server.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  }
+}
