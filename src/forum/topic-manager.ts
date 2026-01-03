@@ -447,6 +447,44 @@ export class TopicManager {
   }
 
   /**
+   * Link a topic to an existing project directory
+   * 
+   * This updates the workDir for the topic and requires restarting the instance.
+   * Returns the updated mapping if successful.
+   */
+  linkToDirectory(
+    chatId: number,
+    topicId: number,
+    workDir: string,
+    userId?: number
+  ): { success: boolean; mapping?: TopicMapping; error?: string } {
+    // Verify the mapping exists
+    const mapping = this.store.getMapping(chatId, topicId)
+    if (!mapping) {
+      return {
+        success: false,
+        error: "No session exists for this topic. Send a message first to create one.",
+      }
+    }
+
+    // Update the workDir
+    const updated = this.store.updateWorkDir(chatId, topicId, workDir, userId)
+    if (!updated) {
+      return {
+        success: false,
+        error: "Failed to update working directory",
+      }
+    }
+
+    // Return updated mapping
+    const updatedMapping = this.store.getMapping(chatId, topicId)
+    return {
+      success: true,
+      mapping: updatedMapping ?? undefined,
+    }
+  }
+
+  /**
    * Manually create a session for a topic (bypasses auto-create check)
    */
   async createSessionForTopic(

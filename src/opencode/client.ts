@@ -179,6 +179,29 @@ export class OpenCodeClient {
   }
 
   // ===========================================================================
+  // Permissions
+  // ===========================================================================
+
+  /**
+   * Respond to a permission request
+   * 
+   * @param sessionId The session ID
+   * @param permissionId The permission request ID
+   * @param response The response: "once" (accept this time), "always" (accept and remember), or "reject" (deny)
+   */
+  async respondToPermission(
+    sessionId: string,
+    permissionId: string,
+    response: "once" | "always" | "reject"
+  ): Promise<boolean> {
+    const res = await this.fetch(`/session/${sessionId}/permissions/${permissionId}`, {
+      method: "POST",
+      body: JSON.stringify({ response }),
+    })
+    return res.json()
+  }
+
+  // ===========================================================================
   // TUI Control (for instances running with TUI)
   // ===========================================================================
 

@@ -3,9 +3,17 @@
   // Telegram Integration Experiment
   // Test the telegram-notify plugin in isolation
   
-  "plugin": [
-    "./plugin/telegram-notify.ts"
-  ],
+  // Plugin disabled - orchestrator bot handles Telegram communication
+  // "plugin": [
+  //   "./plugin/telegram-notify.ts"
+  // ],
+
+  // Permission settings - require approval for bash commands (for testing)
+  "permission": {
+    "bash": "ask",
+    "edit": "allow",
+    "webfetch": "allow"
+  },
 
   "agent": {
     "default": {

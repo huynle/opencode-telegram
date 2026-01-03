@@ -192,6 +192,47 @@ GET  /event                   # SSE event stream
 /status   - Show orchestrator status
 ```
 
+## Tmux Development Environment
+
+The bot runs in a tmux pane within the `dev` session, window `telegram-exp`.
+
+### Pane Layout
+
+| Pane | ID | Target | Command | Purpose |
+|------|----|--------|---------|---------|
+| 0 | `%363` | `dev:telegram-exp.0` | opencode | OpenCode TUI session |
+| 1 | `%368` | `dev:telegram-exp.1` | bun | **Bot process** |
+| 2 | `%359` | `dev:telegram-exp.2` | nvim | Editor |
+
+### Bot Pane Management (Pane `%368`)
+
+**Check logs/status:**
+```
+tmux capture-pane -t %368 -p -S -100
+```
+
+**Stop the bot:**
+```
+tmux send-keys -t %368 C-c
+```
+
+**Start the bot:**
+```
+tmux send-keys -t %368 'bun run dev' Enter
+```
+
+**Restart the bot:**
+```
+tmux send-keys -t %368 C-c && sleep 1 && tmux send-keys -t %368 'bun run dev' Enter
+```
+
+### OpenCode Tool Access
+
+When running inside OpenCode, use the tmux tools directly:
+- `tool_tmux_capture(target: "%368")` - Check logs
+- `tool_tmux_send_keys(target: "%368", keys: "C-c")` - Stop
+- `tool_tmux_send_keys(target: "%368", keys: "bun run dev")` + `Enter` - Start
+
 ## Recent Changes (Latest Session)
 
 1. **Port cleanup on start** - Kills stale processes before binding

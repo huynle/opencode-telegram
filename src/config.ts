@@ -111,7 +111,7 @@ const DEFAULT_CONFIG: AppConfig = {
     topicDbPath: "./data/topics.db",
   },
   project: {
-    basePath: process.env.HOME || "/tmp",
+    basePath: `${process.env.HOME || "/tmp"}/oc-bot`,
     autoCreateDirs: true,
   },
 }

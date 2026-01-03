@@ -32,6 +32,9 @@ export type {
   ToolExecuteEvent,
   ToolResultEvent,
   FileEditedEvent,
+  PermissionUpdatedEvent,
+  PermissionRepliedEvent,
+  Permission,
   
   // Configuration types
   OpenCodeClientConfig,
@@ -41,6 +44,7 @@ export type {
   // Callback types
   TelegramSendCallback,
   TelegramDeleteCallback,
+  InlineKeyboardButton,
 } from "./types"
 
 export {
@@ -54,3 +58,11 @@ export { OpenCodeClient, createClient } from "./client"
 
 // Stream Handler
 export { StreamHandler, createStreamHandler } from "./stream-handler"
+export type { PendingPermission } from "./stream-handler"
+
+// Markdown utilities
+export { 
+  markdownToTelegramHtml, 
+  truncateForTelegram, 
+  containsMarkdown 
+} from "./telegram-markdown"

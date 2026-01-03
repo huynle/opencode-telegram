@@ -94,35 +94,46 @@ export class InstanceManager {
     if (existingId) {
       const instance = this.instances.get(existingId)
       if (instance) {
-        // If running, just return it
-        if (instance.isHealthy) {
-          console.log(`[Manager] Returning existing instance for topic ${topicId}`)
-          instance.recordActivity()
-          return instance.info
-        }
-        
-        // If crashed or failed, try to restart
-        if (instance.state === "crashed" || instance.state === "failed") {
-          console.log(`[Manager] Restarting crashed instance for topic ${topicId}`)
-          return this.restartInstance(existingId)
-        }
-        
-        // If starting, wait for it
-        if (instance.state === "starting") {
-          console.log(`[Manager] Instance for topic ${topicId} is starting, waiting...`)
-          // Wait up to startup timeout
-          const waitStart = Date.now()
-          while (instance.state === "starting" && Date.now() - waitStart < this.config.startupTimeoutMs) {
-            await new Promise(resolve => setTimeout(resolve, 500))
+        // Check if workDir has changed (topic was linked to different directory)
+        if (instance.info.config.workDir !== workDir) {
+          console.log(`[Manager] WorkDir changed for topic ${topicId}: ${instance.info.config.workDir} -> ${workDir}`)
+          console.log(`[Manager] Stopping and removing instance to restart with new workDir`)
+          await this.stopInstance(existingId)
+          // Remove the old instance so we can create a new one with the new workDir
+          this.instances.delete(existingId)
+          this.topicToInstance.delete(topicId)
+          // Fall through to create new instance with new workDir
+        } else {
+          // If running, just return it
+          if (instance.isHealthy) {
+            console.log(`[Manager] Returning existing instance for topic ${topicId}`)
+            instance.recordActivity()
+            return instance.info
           }
-          return instance.isHealthy ? instance.info : null
-        }
-        
-        // If stopped, start it
-        if (instance.state === "stopped") {
-          console.log(`[Manager] Starting stopped instance for topic ${topicId}`)
-          const success = await instance.start()
-          return success ? instance.info : null
+          
+          // If crashed or failed, try to restart
+          if (instance.state === "crashed" || instance.state === "failed") {
+            console.log(`[Manager] Restarting crashed instance for topic ${topicId}`)
+            return this.restartInstance(existingId)
+          }
+          
+          // If starting, wait for it
+          if (instance.state === "starting") {
+            console.log(`[Manager] Instance for topic ${topicId} is starting, waiting...`)
+            // Wait up to startup timeout
+            const waitStart = Date.now()
+            while (instance.state === "starting" && Date.now() - waitStart < this.config.startupTimeoutMs) {
+              await new Promise(resolve => setTimeout(resolve, 500))
+            }
+            return instance.isHealthy ? instance.info : null
+          }
+          
+          // If stopped, start it
+          if (instance.state === "stopped") {
+            console.log(`[Manager] Starting stopped instance for topic ${topicId}`)
+            const success = await instance.start()
+            return success ? instance.info : null
+          }
         }
       }
     }

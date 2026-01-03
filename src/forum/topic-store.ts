@@ -48,6 +48,7 @@ export class TopicStore {
         topic_id INTEGER NOT NULL,
         topic_name TEXT NOT NULL,
         session_id TEXT NOT NULL,
+        work_dir TEXT,
         status TEXT NOT NULL DEFAULT 'active',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -58,6 +59,22 @@ export class TopicStore {
         PRIMARY KEY (chat_id, topic_id)
       )
     `)
+
+    // Migration: Add work_dir column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE topic_mappings ADD COLUMN work_dir TEXT`)
+      console.log("[TopicStore] Added work_dir column")
+    } catch {
+      // Column already exists, ignore
+    }
+
+    // Migration: Add streaming_enabled column if it doesn't exist
+    try {
+      this.db.exec(`ALTER TABLE topic_mappings ADD COLUMN streaming_enabled INTEGER DEFAULT 0`)
+      console.log("[TopicStore] Added streaming_enabled column")
+    } catch {
+      // Column already exists, ignore
+    }
 
     // Index for fast session lookups
     this.db.exec(`
@@ -285,6 +302,61 @@ export class TopicStore {
       return false
     } catch (error) {
       console.error(`[TopicStore] Failed to update status: ${error}`)
+      return false
+    }
+  }
+
+  /**
+   * Toggle streaming for a topic
+   */
+  toggleStreaming(chatId: number, topicId: number, enabled: boolean, userId?: number): boolean {
+    const now = Date.now()
+
+    try {
+      const stmt = this.db.prepare(`
+        UPDATE topic_mappings
+        SET streaming_enabled = ?, updated_at = ?
+        WHERE chat_id = ? AND topic_id = ?
+      `)
+
+      const result = stmt.run(enabled ? 1 : 0, now, chatId, topicId)
+
+      if (result.changes > 0) {
+        console.log(`[TopicStore] Updated topic ${topicId} streaming to ${enabled}`)
+        return true
+      }
+
+      return false
+    } catch (error) {
+      console.error(`[TopicStore] Failed to toggle streaming: ${error}`)
+      return false
+    }
+  }
+
+  /**
+   * Update topic working directory (for linking to existing projects)
+   */
+  updateWorkDir(chatId: number, topicId: number, workDir: string, userId?: number): boolean {
+    const now = Date.now()
+
+    try {
+      const stmt = this.db.prepare(`
+        UPDATE topic_mappings
+        SET work_dir = ?, updated_at = ?
+        WHERE chat_id = ? AND topic_id = ?
+      `)
+
+      const result = stmt.run(workDir, now, chatId, topicId)
+
+      if (result.changes > 0) {
+        this.logEvent(chatId, topicId, "linked", userId, { workDir })
+        console.log(`[TopicStore] Updated topic ${topicId} workDir to "${workDir}"`)
+        return true
+      }
+
+      return false
+    } catch (error) {
+      console.error(`[TopicStore] Failed to update workDir: ${error}`)
       return false
     }
   }
@@ -520,6 +592,8 @@ export class TopicStore {
       topicId: row.topic_id as number,
       topicName: row.topic_name as string,
       sessionId: row.session_id as string,
+      workDir: row.work_dir as string | undefined,
+      streamingEnabled: (row.streaming_enabled as number) === 1,
       status: row.status as TopicStatus,
       createdAt: row.created_at as number,
       updatedAt: row.updated_at as number,

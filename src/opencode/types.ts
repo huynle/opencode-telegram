@@ -270,6 +270,45 @@ export interface FileEditedEvent extends BaseSSEEvent {
 }
 
 /**
+ * Permission object from OpenCode API
+ */
+export interface Permission {
+  id: string
+  type: string
+  pattern?: string | string[]
+  sessionID: string
+  messageID: string
+  callID?: string
+  title: string
+  metadata: Record<string, unknown>
+  time: {
+    created: number
+  }
+  [key: string]: unknown // Allow index signature for compatibility
+}
+
+/**
+ * Permission updated event - permission request from OpenCode
+ */
+export interface PermissionUpdatedEvent {
+  type: "permission.updated"
+  properties: Permission
+}
+
+/**
+ * Permission replied event - confirmation that permission was processed
+ */
+export interface PermissionRepliedEvent {
+  type: "permission.replied"
+  properties: {
+    sessionID: string
+    permissionID: string
+    response: string
+    [key: string]: unknown
+  }
+}
+
+/**
  * Union of all SSE event types
  */
 export type SSEEvent =
@@ -281,6 +320,8 @@ export type SSEEvent =
   | ToolExecuteEvent
   | ToolResultEvent
   | FileEditedEvent
+  | PermissionUpdatedEvent
+  | PermissionRepliedEvent
   | BaseSSEEvent // Fallback for unknown events
 
 // =============================================================================
@@ -361,6 +402,14 @@ export interface StreamingState {
 }
 
 /**
+ * Inline keyboard button for Telegram
+ */
+export interface InlineKeyboardButton {
+  text: string
+  callback_data: string
+}
+
+/**
  * Callback for sending Telegram messages
  */
 export type TelegramSendCallback = (
@@ -371,6 +420,7 @@ export type TelegramSendCallback = (
     parseMode?: "HTML" | "Markdown" | "MarkdownV2"
     replyToMessageId?: number
     editMessageId?: number
+    inlineKeyboard?: InlineKeyboardButton[][]
   }
 ) => Promise<{ messageId: number }>
 
@@ -401,9 +451,11 @@ export interface StreamHandlerConfig {
 
 /**
  * Default stream handler configuration
+ * Note: updateIntervalMs defaults to 2000ms to stay within Telegram rate limits
+ * Telegram rate limits edits more aggressively than new messages
  */
 export const DEFAULT_STREAM_HANDLER_CONFIG: StreamHandlerConfig = {
-  updateIntervalMs: 500,
+  updateIntervalMs: 2000,
   maxProgressTextLength: 200,
   showToolNames: true,
   deleteProgressOnComplete: true,

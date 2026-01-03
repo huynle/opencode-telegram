@@ -22,6 +22,12 @@ export interface TopicMapping {
   // OpenCode session
   sessionId: string                 // OpenCode session ID
   
+  // Working directory (for linking to existing projects)
+  workDir?: string                  // Custom working directory path (if linked)
+  
+  // Streaming preference
+  streamingEnabled?: boolean        // Whether to stream responses in real-time (default: false)
+  
   // Lifecycle tracking
   status: TopicStatus               // Current topic state
   createdAt: number                 // Unix timestamp when mapping was created
@@ -64,6 +70,7 @@ export type TopicEventType =
   | "renamed"                       // Topic name changed
   | "deleted"                       // Topic was deleted
   | "message"                       // Message received in topic
+  | "linked"                        // Topic linked to external directory
 
 /**
  * Record of a topic lifecycle event
