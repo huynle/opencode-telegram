@@ -1,0 +1,34 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // Telegram Integration Experiment
+  // Test the telegram-notify plugin in isolation
+  
+  "plugin": [
+    "./plugin/telegram-notify.ts"
+  ],
+
+  "agent": {
+    "default": {
+      "instructions": [
+        "## Telegram Notifications",
+        "",
+        "You have access to Telegram notification tools. Use them appropriately:",
+        "",
+        "**When to start task tracking (telegram_start_task):**",
+        "- User says 'track this', 'notify me', 'let me know when done'",
+        "- User mentions 'telegram', 'notification', or 'alert me'",
+        "- User asks for updates on a long-running task",
+        "- Task will clearly take multiple steps or significant time",
+        "",
+        "**When to send updates (telegram_task_update):**",
+        "- Significant milestone reached",
+        "- User explicitly asks for a progress update",
+        "",
+        "**When NOT to use telegram tools:**",
+        "- Quick single-step tasks",
+        "- User hasn't indicated they want notifications",
+        "- Just answering questions or having a conversation"
+      ]
+    }
+  }
+}

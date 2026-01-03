@@ -161,10 +161,13 @@ export const TelegramNotify: Plugin = async ({ client, directory, $ }) => {
       // Session error
       if (event.type === "session.error") {
         const sessionID = event.properties?.sessionID as string
-        const error = event.properties?.error as string
+        const errorProp = event.properties?.error
+        const errorMessage = typeof errorProp === "string" 
+          ? errorProp 
+          : (errorProp as any)?.message || "Unknown error"
 
         await telegram.sendMessage({
-          text: `❌ *Session Error*\n\n${codeBlock(error?.slice(0, 500) || "Unknown error")}${formatSessionInfo(sessionID)}`,
+          text: `❌ *Session Error*\n\n${codeBlock(errorMessage.slice(0, 500))}${formatSessionInfo(sessionID)}`,
         })
 
         const session = sessionTracker.get(sessionID)
@@ -175,13 +178,17 @@ export const TelegramNotify: Plugin = async ({ client, directory, $ }) => {
 
       // Track session creation
       if (event.type === "session.created") {
-        const sessionID = event.properties?.sessionID as string
-        sessionTracker.set(sessionID, {
-          startTime: Date.now(),
-          lastActivity: Date.now(),
-          toolCalls: 0,
-          status: "active",
-        })
+        // Session ID might be in different places depending on event structure
+        const props = event.properties as any
+        const sessionID = props?.id || props?.sessionID || props?.info?.id || "unknown"
+        if (sessionID !== "unknown") {
+          sessionTracker.set(sessionID, {
+            startTime: Date.now(),
+            lastActivity: Date.now(),
+            toolCalls: 0,
+            status: "active",
+          })
+        }
       }
     },
 

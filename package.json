@@ -2,12 +2,17 @@
   "name": "opencode-telegram",
   "version": "0.1.0",
   "type": "module",
-  "description": "Telegram integration for OpenCode - notifications, permission handling, and two-way communication",
+  "description": "Telegram integration for OpenCode - forum topics, multi-instance orchestration, and streaming responses",
   "scripts": {
-    "dev": "bun --watch src/test-plugin.ts",
+    "start": "bun run src/index.ts",
+    "dev": "bun --watch src/index.ts",
+    "dev:plugin": "bun --watch src/test-plugin.ts",
     "test:send": "bun run src/test-send.ts",
     "test:webhook": "bun run src/webhook-server.ts",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "grammy": "^1.21.0"
   },
   "devDependencies": {
     "@types/bun": "latest",
