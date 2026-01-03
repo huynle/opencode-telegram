@@ -8,10 +8,9 @@
   //   "./plugin/telegram-notify.ts"
   // ],
 
-  // Local commands for telegram linking
-  "command": [
-    "./command"
-  ],
+  // Commands are loaded from .opencode/command/ directory
+  // - /telegram-link - Link session to Telegram topic
+  // - /telegram-unlink - Disconnect from Telegram
 
   // Permission settings - require approval for bash commands (for testing)
   "permission": {
