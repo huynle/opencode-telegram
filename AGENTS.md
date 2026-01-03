@@ -190,7 +190,41 @@ GET  /event                   # SSE event stream
 /session  - Show current topic's OpenCode session info
 /topics   - List all active topics with sessions
 /status   - Show orchestrator status
+/new      - Create a new topic (in General topic)
+/link     - Link topic to existing project directory
+/stream   - Toggle real-time streaming on/off
+/help     - Show context-aware help
 ```
+
+### External Instance API (Port 4200)
+```
+GET  /api/health              # API server health check
+POST /api/register            # Register external OpenCode instance
+POST /api/unregister          # Unregister instance
+GET  /api/status/:projectPath # Check registration status
+GET  /api/instances           # List all external instances
+```
+
+### Linking External OpenCode Sessions
+
+Any OpenCode instance can link to this bot using the `telegram_link` tool:
+
+1. Set environment variables in your OpenCode session:
+   ```bash
+   export TELEGRAM_BOT_API_URL=http://localhost:4200
+   export TELEGRAM_BOT_API_KEY=your-api-key  # optional
+   ```
+
+2. In your OpenCode session, say:
+   ```
+   Link this session to Telegram
+   ```
+
+3. OpenCode will call `telegram_link` which:
+   - Creates a new Telegram forum topic
+   - Subscribes to your session's SSE events
+   - Forwards all responses to Telegram
+   - Routes Telegram messages back to your session
 
 ## Tmux Development Environment
 

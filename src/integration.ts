@@ -27,6 +27,7 @@ import {
   type TelegramDeleteCallback,
 } from "./opencode"
 import type { IOpenCodeClient, ResponseHandler, ForumMessageContext, MessageRouteResult } from "./types/forum"
+import { ApiServer, createApiServer } from "./api-server"
 
 // =============================================================================
 // Types
@@ -47,6 +48,9 @@ export interface IntegratedApp {
   
   /** Stream handler for SSE → Telegram bridging */
   streamHandler: StreamHandler
+  
+  /** API server for external instance registration */
+  apiServer: ApiServer
   
   /** Start the application */
   start(): Promise<void>
@@ -179,6 +183,9 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
 
   // Create topic store for direct access
   const topicStore = new TopicStore(config.storage.topicDbPath)
+
+  // API server will be created after bot setup (needs bot reference)
+  let apiServer: ApiServer
 
   // Helper to find instance by session ID
   function findInstanceBySession(sessionId: string): InstanceInfo | null {
@@ -403,6 +410,18 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
   ): Promise<MessageRouteResult> {
     const { chatId, topicId, text } = context
     const effectiveTopicId = context.isGeneralTopic ? 0 : topicId
+
+    // Check if this topic is linked to an external OpenCode instance
+    if (apiServer.isExternalTopic(effectiveTopicId)) {
+      const success = await apiServer.routeMessageToExternal(effectiveTopicId, text)
+      if (success) {
+        const external = apiServer.getExternalByTopic(effectiveTopicId)
+        return { success: true, sessionId: external?.sessionId }
+      } else {
+        await sendToTopic(bot, chatId, effectiveTopicId, "Failed to send message to external OpenCode instance.")
+        return { success: false, error: "External instance not reachable" }
+      }
+    }
 
     // Get topic mapping from store
     const mapping = topicStore.getMapping(chatId, effectiveTopicId)
@@ -631,6 +650,17 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
     console.error("[Integration] Bot error:", err)
   })
 
+  // Create API server for external instance registration
+  const apiPort = parseInt(process.env.API_PORT || "4200")
+  apiServer = createApiServer({
+    port: apiPort,
+    bot,
+    config,
+    topicStore,
+    streamHandler,
+    apiKey: process.env.API_KEY,
+  })
+
   console.log("[Integration] Components initialized")
 
   return {
@@ -638,6 +668,7 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
     topicManager,
     instanceManager,
     streamHandler,
+    apiServer,
 
     async start() {
       console.log("[Integration] Starting application...")
@@ -656,6 +687,9 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
 
     async stop() {
       console.log("[Integration] Stopping application...")
+
+      // Stop API server
+      apiServer.stop()
 
       // Stop SSE subscriptions
       for (const [id, abort] of sseSubscriptions) {

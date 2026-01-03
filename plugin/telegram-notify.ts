@@ -884,6 +884,118 @@ export const TelegramNotify: Plugin = async ({ client, directory, $ }) => {
           return `⏰ No response received within ${CONFIG.pollTimeout / 1000} seconds`
         },
       }),
+
+      telegram_link: tool({
+        description: "Link this OpenCode session to a Telegram forum topic for remote monitoring and control. " +
+          "Use this when the user wants to: continue the conversation on Telegram, receive notifications on their phone, " +
+          "monitor progress remotely, switch to mobile, or says phrases like 'link to telegram', 'notify me on telegram', " +
+          "'continue on my phone', 'switch to telegram', 'connect to telegram'.",
+        args: {
+          topicName: tool.schema.string().optional()
+            .describe("Custom name for the Telegram topic (defaults to project directory name)"),
+          enableStreaming: tool.schema.boolean().optional()
+            .describe("Enable real-time response streaming in Telegram (default: true)"),
+        },
+        async execute(args, context) {
+          const { sessionID } = context
+          
+          // Get the Telegram bot API URL from environment
+          const botApiUrl = process.env.TELEGRAM_BOT_API_URL
+          if (!botApiUrl) {
+            return `❌ TELEGRAM_BOT_API_URL environment variable not set. ` +
+              `Set it to the URL of the Telegram bot service (e.g., http://localhost:4200)`
+          }
+
+          // Determine project name from directory or use custom name
+          const projectName = args.topicName || directory.split('/').pop() || 'opencode-session'
+          
+          // Get the OpenCode server port (default to 4096 for TUI mode)
+          const opencodePort = parseInt(process.env.OPENCODE_PORT || "4096")
+
+          try {
+            // Register with the Telegram bot service
+            const response = await fetch(`${botApiUrl}/api/register`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(process.env.TELEGRAM_BOT_API_KEY 
+                  ? { "X-API-Key": process.env.TELEGRAM_BOT_API_KEY }
+                  : {}),
+              },
+              body: JSON.stringify({
+                projectPath: directory,
+                projectName,
+                opencodePort,
+                sessionId: sessionID,
+                enableStreaming: args.enableStreaming ?? true,
+              }),
+            })
+
+            if (!response.ok) {
+              const error = await response.text()
+              return `❌ Failed to link: ${error}`
+            }
+
+            const result = await response.json() as { 
+              success: boolean
+              topicId?: number
+              topicUrl?: string
+              error?: string 
+            }
+
+            if (!result.success) {
+              return `❌ Failed to link: ${result.error || 'Unknown error'}`
+            }
+
+            return `✅ *Linked to Telegram!*\n\n` +
+              `*Topic:* ${projectName}\n` +
+              `*Link:* ${result.topicUrl}\n\n` +
+              `You can now continue this conversation from Telegram. ` +
+              `Messages sent there will appear here, and vice versa.`
+          } catch (error) {
+            const errMsg = error instanceof Error ? error.message : String(error)
+            return `❌ Failed to connect to Telegram bot service: ${errMsg}\n\n` +
+              `Make sure the bot is running at ${botApiUrl}`
+          }
+        },
+      }),
+
+      telegram_unlink: tool({
+        description: "Disconnect this OpenCode session from Telegram. " +
+          "Use when the user wants to stop Telegram notifications or disconnect from mobile.",
+        args: {},
+        async execute(args, context) {
+          const botApiUrl = process.env.TELEGRAM_BOT_API_URL
+          if (!botApiUrl) {
+            return `Not linked to Telegram (TELEGRAM_BOT_API_URL not set)`
+          }
+
+          try {
+            const response = await fetch(`${botApiUrl}/api/unregister`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...(process.env.TELEGRAM_BOT_API_KEY 
+                  ? { "X-API-Key": process.env.TELEGRAM_BOT_API_KEY }
+                  : {}),
+              },
+              body: JSON.stringify({
+                projectPath: directory,
+              }),
+            })
+
+            if (!response.ok) {
+              const error = await response.text()
+              return `❌ Failed to unlink: ${error}`
+            }
+
+            return `✅ Unlinked from Telegram. The topic will remain but messages will no longer be forwarded.`
+          } catch (error) {
+            const errMsg = error instanceof Error ? error.message : String(error)
+            return `❌ Error: ${errMsg}`
+          }
+        },
+      }),
     },
   }
 }
