@@ -8,6 +8,11 @@
   //   "./plugin/telegram-notify.ts"
   // ],
 
+  // Local commands for telegram linking
+  "command": [
+    "./command"
+  ],
+
   // Permission settings - require approval for bash commands (for testing)
   "permission": {
     "bash": "ask",

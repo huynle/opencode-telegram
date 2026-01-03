@@ -207,24 +207,39 @@ GET  /api/instances           # List all external instances
 
 ### Linking External OpenCode Sessions
 
-Any OpenCode instance can link to this bot using the `telegram_link` tool:
+Any OpenCode instance can link to this bot using the `/telegram-link` command or `telegram_link` tool.
 
-1. Set environment variables in your OpenCode session:
-   ```bash
-   export TELEGRAM_BOT_API_URL=http://localhost:4200
-   export TELEGRAM_BOT_API_KEY=your-api-key  # optional
-   ```
+#### Method 1: Slash Command (Recommended)
 
-2. In your OpenCode session, say:
-   ```
-   Link this session to Telegram
-   ```
+```bash
+# Set the bot API URL (add to your shell profile)
+export TELEGRAM_BOT_API_URL=http://localhost:4200
 
-3. OpenCode will call `telegram_link` which:
-   - Creates a new Telegram forum topic
-   - Subscribes to your session's SSE events
-   - Forwards all responses to Telegram
-   - Routes Telegram messages back to your session
+# In any OpenCode session, run:
+/telegram-link              # Uses directory name as topic
+/telegram-link my-project   # Custom topic name
+```
+
+#### Method 2: Natural Language (via plugin tool)
+
+```
+Link this session to Telegram
+```
+
+OpenCode will call `telegram_link` which handles the registration.
+
+#### What Happens
+
+1. Creates a new Telegram forum topic named after your project
+2. Subscribes to your session's SSE events  
+3. Forwards all responses to Telegram in real-time
+4. Routes Telegram messages back to your session
+
+#### To Unlink
+
+```bash
+/telegram-unlink
+```
 
 ## Tmux Development Environment
 
