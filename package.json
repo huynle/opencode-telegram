@@ -2,7 +2,31 @@
   "name": "opencode-telegram",
   "version": "0.1.0",
   "type": "module",
-  "description": "Telegram integration for OpenCode - forum topics, multi-instance orchestration, and streaming responses",
+  "description": "Telegram bot that orchestrates multiple OpenCode instances through forum topics",
+  "author": "huynle",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huynle/opencode-telegram.git"
+  },
+  "bugs": {
+    "url": "https://github.com/huynle/opencode-telegram/issues"
+  },
+  "homepage": "https://github.com/huynle/opencode-telegram#readme",
+  "keywords": [
+    "telegram",
+    "bot",
+    "opencode",
+    "ai",
+    "coding-assistant",
+    "grammy",
+    "bun",
+    "forum-topics",
+    "multi-instance"
+  ],
+  "engines": {
+    "bun": ">=1.0.0"
+  },
   "scripts": {
     "start": "bun run src/index.ts",
     "dev": "bun --watch src/index.ts",

@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Documentation
+    url: https://github.com/huynle/opencode-telegram#readme
+    about: Check the README before opening an issue
+  - name: OpenCode Documentation
+    url: https://opencode.ai/docs
+    about: For OpenCode-specific questions, check their docs

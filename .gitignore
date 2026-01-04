@@ -1,14 +1,42 @@
+# Dependencies
 node_modules/
+
+# Build output
 dist/
+build/
+out/
+
+# Environment files
 .env
 .env.local
-*.log
-bun.lockb
+.env.*.local
 
-# Test files
-.tmp/
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# Bun
+bun.lockb
 
 # Runtime data
 data/
 .bot.pid
+
+# Test files
+.tmp/
+coverage/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
 oc-telegram
