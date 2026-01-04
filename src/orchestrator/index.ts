@@ -94,16 +94,13 @@ export type {
  * // In your Telegram bot handler:
  * 
  * import { InstanceManager, type OrchestratorEvent } from "./orchestrator"
- * import { TelegramClient } from "./telegram-api"
+ * import { Bot } from "grammy"
  * 
  * // Configuration from environment
  * const PROJECT_BASE_PATH = process.env.PROJECT_BASE_PATH || "/home/user/projects"
  * 
  * // Initialize components
- * const telegram = new TelegramClient({
- *   botToken: process.env.TELEGRAM_BOT_TOKEN!,
- *   chatId: process.env.TELEGRAM_CHAT_ID!,
- * })
+ * const bot = new Bot(process.env.TELEGRAM_BOT_TOKEN!)
  * 
  * const manager = new InstanceManager({
  *   maxInstances: 10,
@@ -123,9 +120,8 @@ export type {
  *     case "instance:crashed":
  *       console.log(`Instance ${event.instanceId} crashed: ${event.error}`)
  *       if (event.willRestart) {
- *         telegram.sendMessage({
- *           text: `Instance crashed, restarting...`,
- *           chatId: getTopicChatId(event.instanceId),
+ *         bot.api.sendMessage(chatId, `Instance crashed, restarting...`, {
+ *           message_thread_id: getTopicId(event.instanceId),
  *         })
  *       }
  *       break
@@ -152,10 +148,8 @@ export type {
  *   })
  *   
  *   if (!instance) {
- *     await telegram.sendMessage({
- *       text: "Failed to start OpenCode instance. Please try again.",
- *       chatId: String(chatId),
- *       messageThreadId: topicId,
+ *     await bot.api.sendMessage(chatId, "Failed to start OpenCode instance. Please try again.", {
+ *       message_thread_id: topicId,
  *     })
  *     return
  *   }
@@ -171,10 +165,8 @@ export type {
  *   })
  *   
  *   if (!response.ok) {
- *     await telegram.sendMessage({
- *       text: `Error sending message: ${response.statusText}`,
- *       chatId: String(chatId),
- *       messageThreadId: topicId,
+ *     await bot.api.sendMessage(chatId, `Error sending message: ${response.statusText}`, {
+ *       message_thread_id: topicId,
  *     })
  *   }
  * }
@@ -223,21 +215,17 @@ export type {
  *     case "message":
  *       // Forward assistant message to Telegram topic
  *       if (event.role === "assistant") {
- *         await telegram.sendMessage({
- *           text: event.content,
- *           chatId,
- *           messageThreadId: topicId,
+ *         await bot.api.sendMessage(chatId, event.content, {
+ *           message_thread_id: topicId,
  *         })
  *       }
  *       break
  *       
  *     case "tool":
  *       // Optionally notify about tool usage
- *       await telegram.sendMessage({
- *         text: `Using tool: ${event.toolName}`,
- *         chatId,
- *         messageThreadId: topicId,
- *         disableNotification: true,
+ *       await bot.api.sendMessage(chatId, `Using tool: ${event.toolName}`, {
+ *         message_thread_id: topicId,
+ *         disable_notification: true,
  *       })
  *       break
  *   }

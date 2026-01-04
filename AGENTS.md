@@ -47,6 +47,7 @@ src/
 ├── index.ts              # Entry point - starts the bot
 ├── config.ts             # Configuration from environment variables
 ├── integration.ts        # Wires all components together
+├── api-server.ts         # External instance registration API
 ├── bot/
 │   └── handlers/
 │       └── forum.ts      # Telegram message/command handlers
@@ -57,7 +58,9 @@ src/
 ├── opencode/
 │   ├── index.ts          # Exports
 │   ├── client.ts         # OpenCode REST API client
+│   ├── discovery.ts      # Discover running OpenCode instances
 │   ├── stream-handler.ts # SSE → Telegram message bridging
+│   ├── telegram-markdown.ts # Markdown conversion for Telegram
 │   └── types.ts          # OpenCode-related types
 ├── orchestrator/
 │   ├── index.ts          # Exports
@@ -65,13 +68,9 @@ src/
 │   ├── instance.ts       # Single OpenCode instance lifecycle
 │   ├── port-pool.ts      # Port allocation
 │   └── state-store.ts    # SQLite persistence for instance state
-├── types/
-│   ├── forum.ts          # Forum/topic types
-│   └── orchestrator.ts   # Orchestrator types
-└── telegram-notify.ts    # Original plugin (standalone notifications)
-
-plugin/
-└── telegram-notify.ts    # OpenCode plugin for notifications
+└── types/
+    ├── forum.ts          # Forum/topic types
+    └── orchestrator.ts   # Orchestrator types
 
 data/                     # Runtime data (gitignored)
 ├── orchestrator.db       # Instance state
@@ -222,26 +221,21 @@ GET  /api/instances           # List all external instances
 
 ### Linking External OpenCode Sessions
 
-Any OpenCode instance can link to this bot using the `/telegram-link` command or `telegram_link` tool.
+External OpenCode instances can register with the bot via the API server (port 4200).
 
-#### Method 1: Slash Command (Recommended)
+#### Via API
 
 ```bash
-# Set the bot API URL (add to your shell profile)
-export TELEGRAM_BOT_API_URL=http://localhost:4200
-
-# In any OpenCode session, run:
-/telegram-link              # Uses directory name as topic
-/telegram-link my-project   # Custom topic name
+# Register an external instance
+curl -X POST http://localhost:4200/api/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "projectPath": "/path/to/project",
+    "projectName": "my-project",
+    "opencodePort": 4096,
+    "sessionId": "ses_abc123"
+  }'
 ```
-
-#### Method 2: Natural Language (via plugin tool)
-
-```
-Link this session to Telegram
-```
-
-OpenCode will call `telegram_link` which handles the registration.
 
 #### What Happens
 
@@ -253,7 +247,9 @@ OpenCode will call `telegram_link` which handles the registration.
 #### To Unlink
 
 ```bash
-/telegram-unlink
+curl -X POST http://localhost:4200/api/unregister \
+  -H "Content-Type: application/json" \
+  -d '{"projectPath": "/path/to/project"}'
 ```
 
 ### Session Discovery
