@@ -18,13 +18,22 @@ import {
   createForumHandlers, 
   createForumCommands,
   sendToTopic,
+  type ActiveSessionInfo,
+  type ConnectResult,
+  type DisconnectResult,
+  type StaleSessionInfo,
+  type CreateTopicResult,
 } from "./bot/handlers/forum"
 import { 
   OpenCodeClient, 
   StreamHandler,
+  discoverSessions,
+  isPortAlive,
+  findSession,
   type SSEEvent,
   type TelegramSendCallback,
   type TelegramDeleteCallback,
+  type DiscoveredSession,
 } from "./opencode"
 import type { IOpenCodeClient, ResponseHandler, ForumMessageContext, MessageRouteResult } from "./types/forum"
 import { ApiServer, createApiServer } from "./api-server"
@@ -413,13 +422,125 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
 
     // Check if this topic is linked to an external OpenCode instance
     if (apiServer.isExternalTopic(effectiveTopicId)) {
+      const external = apiServer.getExternalByTopic(effectiveTopicId)
+      if (external?.sessionId) {
+        // Mark this message as coming from Telegram so we don't echo it back
+        streamHandler.markMessageFromTelegram(external.sessionId, text)
+      }
       const success = await apiServer.routeMessageToExternal(effectiveTopicId, text)
       if (success) {
-        const external = apiServer.getExternalByTopic(effectiveTopicId)
         return { success: true, sessionId: external?.sessionId }
       } else {
         await sendToTopic(bot, chatId, effectiveTopicId, "Failed to send message to external OpenCode instance.")
         return { success: false, error: "External instance not reachable" }
+      }
+    }
+
+    // Check if this topic is linked to a discovered session
+    const discoveredKey = `discovered_${effectiveTopicId}`
+    const discoveredClient = clients.get(discoveredKey)
+    if (discoveredClient) {
+      // This topic is connected to a discovered session - use that client
+      const mapping = topicStore.getMapping(chatId, effectiveTopicId)
+      if (mapping?.sessionId) {
+        try {
+          // Mark this message as coming from Telegram so we don't echo it back
+          streamHandler.markMessageFromTelegram(mapping.sessionId, text)
+          await discoveredClient.sendMessageAsync(mapping.sessionId, text)
+          console.log(`[Integration] Sent message to discovered session ${mapping.sessionId}`)
+          return { success: true, sessionId: mapping.sessionId }
+        } catch (error) {
+          const errorMsg = error instanceof Error ? error.message : String(error)
+          console.error(`[Integration] Failed to send to discovered session:`, errorMsg)
+          
+          // Check if the session is still alive
+          const isHealthy = await discoveredClient.isHealthy()
+          if (!isHealthy) {
+            // Clean up the dead discovered session
+            const abort = sseSubscriptions.get(discoveredKey)
+            if (abort) {
+              abort()
+              sseSubscriptions.delete(discoveredKey)
+            }
+            discoveredClient.close()
+            clients.delete(discoveredKey)
+            streamHandler.unregisterSession(mapping.sessionId)
+            
+            // Try to auto-reconnect: discover TUI sessions in the same directory
+            console.log(`[Integration] Attempting to reconnect to TUI session in ${mapping.workDir}`)
+            const discovered = await discoverSessions()
+            // Only reconnect to TUI instances, not managed 'opencode serve' instances
+            const reconnectSession = discovered.find(s => 
+              s.instance.isTui && (s.directory === mapping.workDir || s.id === mapping.sessionId)
+            )
+            
+            if (reconnectSession) {
+              console.log(`[Integration] Found session to reconnect: ${reconnectSession.id} on port ${reconnectSession.instance.port}`)
+              
+              // Create new client for the reconnected session
+              const newClient = new OpenCodeClient({
+                baseUrl: `http://localhost:${reconnectSession.instance.port}`,
+              })
+              
+              // Subscribe to SSE events
+              const newAbort = newClient.subscribe(
+                (sseEvent: SSEEvent) => {
+                  console.log(`[Integration] SSE event from reconnected session:`, sseEvent.type)
+                  streamHandler.handleEvent(sseEvent)
+                },
+                (error) => {
+                  console.error(`[Integration] SSE error for reconnected session:`, error)
+                }
+              )
+              
+              // Store the new subscription
+              sseSubscriptions.set(discoveredKey, newAbort)
+              clients.set(discoveredKey, newClient)
+              
+              // Update the mapping if session ID changed
+              if (reconnectSession.id !== mapping.sessionId) {
+                topicStore.deleteMapping(chatId, effectiveTopicId)
+                topicStore.createMapping(chatId, effectiveTopicId, mapping.topicName, reconnectSession.id, {
+                  creatorUserId: mapping.creatorUserId,
+                  iconColor: mapping.iconColor,
+                  iconEmojiId: mapping.iconEmojiId,
+                })
+                topicStore.updateWorkDir(chatId, effectiveTopicId, mapping.workDir!)
+                topicStore.toggleStreaming(chatId, effectiveTopicId, mapping.streamingEnabled ?? false)
+              }
+              
+              // Re-register with stream handler
+              streamHandler.registerSession(reconnectSession.id, chatId, effectiveTopicId, mapping.streamingEnabled ?? false)
+              
+              // Now send the message
+              try {
+                streamHandler.markMessageFromTelegram(reconnectSession.id, text)
+                await newClient.sendMessageAsync(reconnectSession.id, text)
+                console.log(`[Integration] Reconnected and sent message to session ${reconnectSession.id}`)
+                
+                // Notify user of successful reconnection
+                await sendToTopic(bot, chatId, effectiveTopicId, 
+                  "🔄 Reconnected to OpenCode session."
+                )
+                
+                return { success: true, sessionId: reconnectSession.id }
+              } catch (reconnectError) {
+                console.error(`[Integration] Failed to send after reconnect:`, reconnectError)
+                // Fall through to show error message
+              }
+            }
+            
+            await sendToTopic(bot, chatId, effectiveTopicId, 
+              "⚠️ The discovered session is no longer available.\n\n" +
+              "The OpenCode instance may have been closed. " +
+              "Send another message to start a new managed instance, or use `/connect` to link to a different session."
+            )
+            return { success: false, error: "Discovered session no longer available" }
+          }
+          
+          await sendToTopic(bot, chatId, effectiveTopicId, `Error: ${errorMsg}`)
+          return { success: false, error: errorMsg }
+        }
       }
     }
 
@@ -430,6 +551,75 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
     // Use custom workDir if linked, otherwise use default path
     // Special case: General topic (topicId=0) uses /tmp for direct OpenCode conversations
     const workDir = mapping?.workDir || (effectiveTopicId === 0 ? "/tmp" : `${config.project.basePath}/${topicName}`)
+
+    // Before creating a managed instance, check if there's an existing TUI we can connect to
+    // This handles the case where:
+    // 1. User connected to a discovered session via /connect
+    // 2. The TUI was closed
+    // 3. User reopened the TUI
+    // 4. We should reconnect to the TUI instead of creating a new managed instance
+    if (mapping?.workDir) {
+      console.log(`[Integration] Checking for existing TUI in ${workDir}`)
+      const discovered = await discoverSessions()
+      // Only connect to TUI instances, not managed 'opencode serve' instances
+      const existingSession = discovered.find(s => s.directory === workDir && s.instance.isTui)
+      
+      if (existingSession) {
+        console.log(`[Integration] Found existing TUI session: ${existingSession.id} on port ${existingSession.instance.port}`)
+        
+        // Connect to the existing TUI instead of creating a managed instance
+        const newClient = new OpenCodeClient({
+          baseUrl: `http://localhost:${existingSession.instance.port}`,
+        })
+        
+        // Subscribe to SSE events
+        const discoveredKey = `discovered_${effectiveTopicId}`
+        const newAbort = newClient.subscribe(
+          (sseEvent: SSEEvent) => {
+            console.log(`[Integration] SSE event from reconnected TUI:`, sseEvent.type)
+            streamHandler.handleEvent(sseEvent)
+          },
+          (error) => {
+            console.error(`[Integration] SSE error for reconnected TUI:`, error)
+          }
+        )
+        
+        // Store the subscription
+        sseSubscriptions.set(discoveredKey, newAbort)
+        clients.set(discoveredKey, newClient)
+        
+        // Update the mapping if session ID changed
+        if (existingSession.id !== mapping.sessionId) {
+          topicStore.deleteMapping(chatId, effectiveTopicId)
+          topicStore.createMapping(chatId, effectiveTopicId, mapping.topicName, existingSession.id, {
+            creatorUserId: mapping.creatorUserId,
+            iconColor: mapping.iconColor,
+            iconEmojiId: mapping.iconEmojiId,
+          })
+          topicStore.updateWorkDir(chatId, effectiveTopicId, workDir)
+          topicStore.toggleStreaming(chatId, effectiveTopicId, mapping.streamingEnabled ?? false)
+        }
+        
+        // Register with stream handler
+        streamHandler.registerSession(existingSession.id, chatId, effectiveTopicId, mapping.streamingEnabled ?? false)
+        
+        // Send the message
+        try {
+          streamHandler.markMessageFromTelegram(existingSession.id, text)
+          await newClient.sendMessageAsync(existingSession.id, text)
+          console.log(`[Integration] Connected to existing TUI and sent message to session ${existingSession.id}`)
+          
+          await sendToTopic(bot, chatId, effectiveTopicId, 
+            "🔄 Reconnected to OpenCode TUI."
+          )
+          
+          return { success: true, sessionId: existingSession.id }
+        } catch (reconnectError) {
+          console.error(`[Integration] Failed to send to existing TUI:`, reconnectError)
+          // Fall through to create managed instance
+        }
+      }
+    }
 
     // Ensure directory exists (only for non-linked directories)
     if (!mapping?.workDir && config.project.autoCreateDirs) {
@@ -482,6 +672,8 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
 
     // Send message asynchronously
     try {
+      // Mark this message as coming from Telegram so we don't echo it back
+      streamHandler.markMessageFromTelegram(currentInstance.sessionId, text)
       await client.sendMessageAsync(currentInstance.sessionId, text)
       return { success: true, sessionId: currentInstance.sessionId }
     } catch (error) {
@@ -498,11 +690,470 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
     return routeMessageToInstance(context)
   }
 
+  // Helper to get all active sessions (managed + external + discovered)
+  async function getActiveSessions(): Promise<ActiveSessionInfo[]> {
+    const sessions: ActiveSessionInfo[] = []
+    const knownSessionIds = new Set<string>()
+    const knownPorts = new Set<number>()
+
+    // Get managed instances from orchestrator
+    const managedInstances = instanceManager.getAllInstances()
+    for (const instance of managedInstances) {
+      if (instance.state === "running" || instance.state === "starting") {
+        if (instance.sessionId) knownSessionIds.add(instance.sessionId)
+        knownPorts.add(instance.port)
+        
+        sessions.push({
+          sessionId: instance.sessionId || `pending_${instance.config.instanceId}`,
+          name: instance.config.name || `Topic ${instance.config.topicId}`,
+          directory: instance.config.workDir,
+          topicId: instance.config.topicId,
+          isExternal: false,
+          isDiscovered: false,
+          port: instance.port,
+          lastActivity: instance.lastActivityAt,
+          status: instance.state === "running" ? "running" : "unknown",
+        })
+      }
+    }
+
+    // Get external instances from API server
+    const externalInstances = apiServer.getExternalInstances()
+    for (const ext of externalInstances) {
+      knownSessionIds.add(ext.sessionId)
+      knownPorts.add(ext.opencodePort)
+      
+      sessions.push({
+        sessionId: ext.sessionId,
+        name: ext.projectName,
+        directory: ext.projectPath,
+        topicId: ext.topicId,
+        isExternal: true,
+        isDiscovered: false,
+        port: ext.opencodePort,
+        lastActivity: ext.lastActivityAt,
+        status: "running", // External instances are assumed running if registered
+      })
+    }
+
+    // Discover other running OpenCode instances
+    try {
+      const discovered = await discoverSessions()
+      
+      for (const disc of discovered) {
+        // Skip if we already know about this session or port
+        if (knownSessionIds.has(disc.id) || knownPorts.has(disc.instance.port)) {
+          continue
+        }
+        
+        // Use directory basename as name, or title if available
+        const name = disc.title || disc.directory.split('/').pop() || 'Unknown'
+        
+        sessions.push({
+          sessionId: disc.id,
+          name,
+          directory: disc.directory,
+          topicId: undefined, // Not linked to a topic yet
+          isExternal: false,
+          isDiscovered: true,
+          port: disc.instance.port,
+          lastActivity: disc.updatedAt,
+          status: "running",
+        })
+      }
+    } catch (error) {
+      console.error('[Integration] Error discovering sessions:', error)
+    }
+
+    return sessions
+  }
+
+  // Helper to connect to an existing session from General topic
+  async function connectToSession(chatId: number, sessionIdentifier: string): Promise<ConnectResult> {
+    // First, get all sessions
+    const sessions = await getActiveSessions()
+    
+    // Find matching session by name or session ID
+    const normalizedId = sessionIdentifier.toLowerCase().trim()
+    const matchingSession = sessions.find(s => 
+      s.name.toLowerCase() === normalizedId ||
+      s.sessionId.toLowerCase().startsWith(normalizedId) ||
+      s.directory.toLowerCase().includes(normalizedId) ||
+      s.directory.split('/').pop()?.toLowerCase() === normalizedId
+    )
+
+    if (!matchingSession) {
+      return {
+        success: false,
+        error: `No session found matching "${sessionIdentifier}".\n\nUse \`/sessions\` to see available sessions.`,
+      }
+    }
+
+    // If session already has a topic, return that
+    if (matchingSession.topicId) {
+      const positiveId = String(chatId).replace(/^-100/, "")
+      return {
+        success: true,
+        sessionId: matchingSession.sessionId,
+        topicId: matchingSession.topicId,
+        topicUrl: `https://t.me/c/${positiveId}/${matchingSession.topicId}`,
+      }
+    }
+
+    // Create a new topic for this session
+    try {
+      const newTopic = await bot.api.createForumTopic(chatId, matchingSession.name)
+      const topicId = newTopic.message_thread_id
+
+      // Register the session with the stream handler
+      streamHandler.registerSession(matchingSession.sessionId, chatId, topicId, true)
+
+      // Create topic mapping
+      topicStore.createMapping(chatId, topicId, matchingSession.name, matchingSession.sessionId, {})
+      topicStore.updateWorkDir(chatId, topicId, matchingSession.directory)
+      topicStore.toggleStreaming(chatId, topicId, true)
+
+      // For discovered sessions, we need to subscribe to SSE events
+      if (matchingSession.isDiscovered && matchingSession.port) {
+        const client = new OpenCodeClient({
+          baseUrl: `http://localhost:${matchingSession.port}`,
+        })
+
+        // Subscribe to SSE events
+        const abort = client.subscribe(
+          (sseEvent: SSEEvent) => {
+            console.log(`[Integration] SSE event from discovered session:`, sseEvent.type)
+            streamHandler.handleEvent(sseEvent)
+          },
+          (error) => {
+            console.error(`[Integration] SSE error for discovered session:`, error)
+          }
+        )
+
+        // Store the subscription for cleanup (using topic ID as key)
+        sseSubscriptions.set(`discovered_${topicId}`, abort)
+        clients.set(`discovered_${topicId}`, client)
+      }
+
+      // Send welcome message
+      const sessionType = matchingSession.isDiscovered ? "discovered" : "existing"
+      await bot.api.sendMessage(
+        chatId,
+        `✅ *Connected to ${sessionType} session*\n\n` +
+        `*Session:* \`${matchingSession.sessionId.slice(0, 12)}...\`\n` +
+        `*Directory:* \`${matchingSession.directory}\`\n` +
+        (matchingSession.port ? `*Port:* ${matchingSession.port}\n` : "") +
+        `\n_Messages sent here will be forwarded to the OpenCode session._`,
+        {
+          message_thread_id: topicId,
+          parse_mode: "Markdown",
+        }
+      )
+
+      const positiveId = String(chatId).replace(/^-100/, "")
+      return {
+        success: true,
+        sessionId: matchingSession.sessionId,
+        topicId,
+        topicUrl: `https://t.me/c/${positiveId}/${topicId}`,
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: `Failed to create topic: ${error instanceof Error ? error.message : String(error)}`,
+      }
+    }
+  }
+
+  // Helper to find stale sessions (topics linked to dead sessions)
+  async function findStaleSessions(chatId: number): Promise<Array<{
+    topicId: number
+    topicName: string
+    sessionId: string
+    directory?: string
+    reason: "port_dead" | "session_missing" | "instance_stopped"
+  }>> {
+    const staleSessions: Array<{
+      topicId: number
+      topicName: string
+      sessionId: string
+      directory?: string
+      reason: "port_dead" | "session_missing" | "instance_stopped"
+    }> = []
+
+    // Get all topic mappings from the store
+    const allMappings = topicStore.queryMappings({ chatId })
+
+    for (const mapping of allMappings) {
+      // Skip if no session ID or if it's a pending session
+      if (!mapping.sessionId || mapping.sessionId.startsWith('pending_')) {
+        continue
+      }
+
+      // Check if this is a managed instance
+      const managedInstance = instanceManager.getInstanceByTopic(mapping.topicId)
+      if (managedInstance) {
+        // Check if the managed instance is stopped/crashed
+        if (managedInstance.state === "stopped" || managedInstance.state === "crashed" || managedInstance.state === "failed") {
+          staleSessions.push({
+            topicId: mapping.topicId,
+            topicName: mapping.topicName,
+            sessionId: mapping.sessionId,
+            directory: mapping.workDir,
+            reason: "instance_stopped",
+          })
+        }
+        continue
+      }
+
+      // Check if this is an external instance
+      const externalInstance = apiServer.getExternalByTopic(mapping.topicId)
+      if (externalInstance) {
+        // Check if the external instance is still alive
+        const alive = await isPortAlive(externalInstance.opencodePort)
+        if (!alive) {
+          staleSessions.push({
+            topicId: mapping.topicId,
+            topicName: mapping.topicName,
+            sessionId: mapping.sessionId,
+            directory: externalInstance.projectPath,
+            reason: "port_dead",
+          })
+        }
+        continue
+      }
+
+      // This mapping is not linked to any known instance - it's orphaned
+      // Try to find if there's a port stored somewhere we can check
+      // For now, mark as session_missing
+      staleSessions.push({
+        topicId: mapping.topicId,
+        topicName: mapping.topicName,
+        sessionId: mapping.sessionId,
+        directory: mapping.workDir,
+        reason: "session_missing",
+      })
+    }
+
+    return staleSessions
+  }
+
+  // Helper to clean up a stale session
+  async function cleanupStaleSession(chatId: number, topicId: number): Promise<boolean> {
+    try {
+      // Clean up SSE subscription if exists
+      const discoveredKey = `discovered_${topicId}`
+      const abort = sseSubscriptions.get(discoveredKey)
+      if (abort) {
+        abort()
+        sseSubscriptions.delete(discoveredKey)
+      }
+
+      const client = clients.get(discoveredKey)
+      if (client) {
+        client.close()
+        clients.delete(discoveredKey)
+      }
+
+      // Remove from stream handler
+      const mapping = topicStore.getMapping(chatId, topicId)
+      if (mapping?.sessionId) {
+        streamHandler.unregisterSession(mapping.sessionId)
+      }
+
+      // Delete the topic mapping
+      topicStore.deleteMapping(chatId, topicId)
+
+      console.log(`[Integration] Cleaned up stale session for topic ${topicId}`)
+      return true
+    } catch (error) {
+      console.error(`[Integration] Error cleaning up stale session:`, error)
+      return false
+    }
+  }
+
+  // Helper to disconnect a session and delete its topic
+  async function disconnectSession(chatId: number, topicId: number): Promise<{
+    success: boolean
+    topicDeleted?: boolean
+    error?: string
+  }> {
+    try {
+      // Get the mapping first
+      const mapping = topicStore.getMapping(chatId, topicId)
+      if (!mapping) {
+        return {
+          success: false,
+          error: "No session mapping found for this topic.",
+        }
+      }
+
+      // Clean up SSE subscription if exists
+      const discoveredKey = `discovered_${topicId}`
+      const abort = sseSubscriptions.get(discoveredKey)
+      if (abort) {
+        abort()
+        sseSubscriptions.delete(discoveredKey)
+      }
+
+      const client = clients.get(discoveredKey)
+      if (client) {
+        client.close()
+        clients.delete(discoveredKey)
+      }
+
+      // Unregister from stream handler
+      if (mapping.sessionId) {
+        streamHandler.unregisterSession(mapping.sessionId)
+      }
+
+      // Delete the topic mapping
+      topicStore.deleteMapping(chatId, topicId)
+
+      // Stop managed instance if exists
+      const managedInstance = instanceManager.getInstanceByTopic(topicId)
+      if (managedInstance) {
+        await instanceManager.stopInstance(managedInstance.config.instanceId)
+      }
+
+      // Try to delete the Telegram topic
+      let topicDeleted = false
+      try {
+        await bot.api.deleteForumTopic(chatId, topicId)
+        topicDeleted = true
+        console.log(`[Integration] Deleted topic ${topicId}`)
+      } catch (error) {
+        // Topic deletion might fail if it's already deleted or we don't have permission
+        console.warn(`[Integration] Could not delete topic ${topicId}:`, error)
+      }
+
+      console.log(`[Integration] Disconnected session for topic ${topicId}`)
+      return {
+        success: true,
+        topicDeleted,
+      }
+    } catch (error) {
+      console.error(`[Integration] Error disconnecting session:`, error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
+  // Helper to create a new topic with directory and OpenCode instance
+  async function createTopicWithInstance(chatId: number, topicName: string): Promise<CreateTopicResult> {
+    try {
+      // Create directory in PROJECT_BASE_PATH
+      const workDir = `${config.project.basePath}/${topicName}`
+      
+      // Create the directory
+      try {
+        await Bun.$`mkdir -p ${workDir}`.quiet()
+        console.log(`[Integration] Created directory: ${workDir}`)
+      } catch (error) {
+        return {
+          success: false,
+          error: `Failed to create directory: ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+
+      // Create the Telegram forum topic
+      let newTopic
+      try {
+        newTopic = await bot.api.createForumTopic(chatId, topicName)
+        console.log(`[Integration] Created topic: "${topicName}" (${newTopic.message_thread_id})`)
+      } catch (error) {
+        return {
+          success: false,
+          error: `Failed to create Telegram topic: ${error instanceof Error ? error.message : String(error)}`,
+        }
+      }
+
+      const topicId = newTopic.message_thread_id
+
+      // Start OpenCode instance for this topic
+      const instance = await instanceManager.getOrCreateInstance(topicId, workDir, {
+        name: topicName,
+      })
+
+      if (!instance) {
+        return {
+          success: false,
+          error: "Failed to start OpenCode instance",
+        }
+      }
+
+      // Wait for instance to be ready (up to 30 seconds)
+      const startTime = Date.now()
+      let sessionId: string | undefined
+      
+      while (Date.now() - startTime < 30000) {
+        const current = instanceManager.getInstance(instance.config.instanceId)
+        if (current?.state === "running" && current.sessionId) {
+          sessionId = current.sessionId
+          break
+        }
+        if (current?.state === "failed" || current?.state === "crashed") {
+          return {
+            success: false,
+            error: `Instance failed to start: ${current.lastError}`,
+          }
+        }
+        await new Promise((r) => setTimeout(r, 500))
+      }
+
+      if (!sessionId) {
+        return {
+          success: false,
+          error: "Instance did not become ready in time",
+        }
+      }
+
+      // Create topic mapping
+      topicStore.createMapping(chatId, topicId, topicName, sessionId, {})
+      topicStore.updateWorkDir(chatId, topicId, workDir)
+      topicStore.toggleStreaming(chatId, topicId, true) // Enable streaming by default
+
+      // Send welcome message to the new topic
+      await bot.api.sendMessage(
+        chatId,
+        `✅ *OpenCode session started*\n\n` +
+        `*Directory:* \`${workDir}\`\n` +
+        `*Session:* \`${sessionId.slice(0, 12)}...\`\n\n` +
+        `_Send a message to start coding!_`,
+        {
+          message_thread_id: topicId,
+          parse_mode: "Markdown",
+        }
+      )
+
+      return {
+        success: true,
+        topicId,
+        sessionId,
+        directory: workDir,
+      }
+    } catch (error) {
+      console.error(`[Integration] Error creating topic with instance:`, error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : String(error),
+      }
+    }
+  }
+
   // Register forum commands FIRST (before text handlers so /commands are processed)
   bot.use(createForumCommands({ 
     topicManager, 
     generalAsControlPlane: true,
     topicStore,
+    getActiveSessions,
+    connectToSession,
+    disconnectSession,
+    findStaleSessions,
+    cleanupStaleSession,
+    createTopicWithInstance,
     onStreamingToggle: (chatId, topicId, enabled) => {
       // Find the session for this topic and update streaming preference
       const mapping = topicStore.getMapping(chatId, topicId)

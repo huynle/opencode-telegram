@@ -66,3 +66,17 @@ export {
   truncateForTelegram, 
   containsMarkdown 
 } from "./telegram-markdown"
+
+// Discovery
+export {
+  discoverInstances,
+  discoverSessions,
+  isSessionAlive,
+  isPortAlive,
+  findSession,
+} from "./discovery"
+
+export type {
+  DiscoveredInstance,
+  DiscoveredSession,
+} from "./discovery"
