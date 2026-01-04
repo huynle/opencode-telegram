@@ -201,6 +201,18 @@ GET  /event                   # SSE event stream
 - `/new myproject` → Creates `~/oc-bot/myproject/`, creates topic, starts OpenCode instance
 - `/connect 1` → Just attaches to existing session #1, no directory created
 
+### Topic Naming Convention
+
+Topics follow the `<project>-<session title>` naming convention:
+
+1. **On `/new <project>`**: Topic is created with just `<project>` name initially
+2. **After first message**: Once OpenCode generates a session title, the topic is automatically renamed to `<project>-<session title>`
+3. **On `/connect`**: If the session already has a title, the topic is created with `<project>-<session title>` immediately
+
+**Examples:**
+- `/new my-app` → Topic: "my-app" → After first message: "my-app-implement user auth"
+- `/connect hindsight` (session titled "fix memory leak") → Topic: "hindsight-fix memory leak"
+
 #### Inside a Topic (Session)
 ```
 /session         - Show current topic's OpenCode session info

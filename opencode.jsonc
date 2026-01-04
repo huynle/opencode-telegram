@@ -13,11 +13,6 @@
   // - /telegram-unlink - Disconnect from Telegram
 
   // Permission settings - require approval for bash commands (for testing)
-  "permission": {
-    "bash": "ask",
-    "edit": "allow",
-    "webfetch": "allow"
-  },
 
   "agent": {
     "default": {

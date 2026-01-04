@@ -58,7 +58,7 @@ export { OpenCodeClient, createClient } from "./client"
 
 // Stream Handler
 export { StreamHandler, createStreamHandler } from "./stream-handler"
-export type { PendingPermission } from "./stream-handler"
+export type { PendingPermission, SessionIdleCallback } from "./stream-handler"
 
 // Markdown utilities
 export { 

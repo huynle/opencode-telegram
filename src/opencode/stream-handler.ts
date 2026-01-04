@@ -33,6 +33,15 @@ export interface PendingPermission {
 }
 
 /**
+ * Callback fired when a session goes idle (response complete)
+ */
+export type SessionIdleCallback = (
+  sessionId: string,
+  chatId: number,
+  topicId: number
+) => void | Promise<void>
+
+/**
  * Streaming state for a session
  */
 export class StreamHandler {
@@ -59,6 +68,9 @@ export class StreamHandler {
   /** Track messages that originated from Telegram (so we don't echo them back) */
   private readonly messagesFromTelegram: Set<string> = new Set()
 
+  /** Callback fired when a session goes idle */
+  private onSessionIdleCallback?: SessionIdleCallback
+
   constructor(
     sendCallback: TelegramSendCallback,
     deleteCallback?: TelegramDeleteCallback,
@@ -67,6 +79,14 @@ export class StreamHandler {
     this.sendCallback = sendCallback
     this.deleteCallback = deleteCallback
     this.config = { ...DEFAULT_STREAM_HANDLER_CONFIG, ...config }
+  }
+
+  /**
+   * Set callback for when a session goes idle (response complete)
+   * Useful for updating topic names after first message
+   */
+  setOnSessionIdle(callback: SessionIdleCallback): void {
+    this.onSessionIdleCallback = callback
   }
 
   // ===========================================================================
@@ -584,6 +604,15 @@ export class StreamHandler {
       this.sentUserMessages.clear()
       for (const key of entries.slice(-50)) {
         this.sentUserMessages.add(key)
+      }
+    }
+
+    // Fire the session idle callback (for topic name updates, etc.)
+    if (this.onSessionIdleCallback) {
+      try {
+        await this.onSessionIdleCallback(sessionId, destination.chatId, destination.topicId)
+      } catch (error) {
+        console.error(`[StreamHandler] onSessionIdle callback error:`, error)
       }
     }
   }

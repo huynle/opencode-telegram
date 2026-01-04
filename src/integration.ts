@@ -212,6 +212,76 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
   // Create topic store for direct access
   const topicStore = new TopicStore(config.storage.topicDbPath)
 
+  // Track which sessions have already had their topic names updated
+  const topicNamesUpdated = new Set<string>()
+
+  // Set up session idle callback to update topic names after first message
+  streamHandler.setOnSessionIdle(async (sessionId, chatId, topicId) => {
+    // Only update once per session
+    if (topicNamesUpdated.has(sessionId)) {
+      return
+    }
+
+    try {
+      // Get the topic mapping
+      const mapping = topicStore.getMapping(chatId, topicId)
+      if (!mapping) {
+        return
+      }
+
+      // Find the client for this session
+      let client: OpenCodeClient | undefined
+      
+      // Check managed instances
+      const instanceId = sessionToInstance.get(sessionId)
+      if (instanceId) {
+        client = clients.get(instanceId)
+      }
+      
+      // Check discovered sessions
+      if (!client) {
+        client = clients.get(`discovered_${topicId}`)
+      }
+
+      if (!client) {
+        return
+      }
+
+      // Get the current session info to check for title
+      const session = await client.getSession(sessionId)
+      if (!session?.title) {
+        return // No title yet
+      }
+
+      // Extract project name from work directory
+      const projectName = mapping.workDir?.split('/').pop() || mapping.topicName.split('-')[0]
+      
+      // Build expected topic name: <project>-<session title>
+      const expectedTopicName = `${projectName}-${session.title}`
+      
+      // Check if topic name already includes the session title
+      if (mapping.topicName === expectedTopicName || mapping.topicName.includes(session.title)) {
+        topicNamesUpdated.add(sessionId)
+        return // Already has the right name
+      }
+
+      // Update the topic name in Telegram
+      console.log(`[Integration] Updating topic name: "${mapping.topicName}" -> "${expectedTopicName}"`)
+      
+      await bot.api.editForumTopic(chatId, topicId, { name: expectedTopicName })
+      
+      // Update the mapping in the store
+      topicStore.updateName(chatId, topicId, expectedTopicName)
+      
+      // Mark as updated
+      topicNamesUpdated.add(sessionId)
+      
+      console.log(`[Integration] Topic name updated to "${expectedTopicName}"`)
+    } catch (error) {
+      console.error(`[Integration] Failed to update topic name:`, error)
+    }
+  })
+
   // API server will be created after bot setup (needs bot reference)
   let apiServer: ApiServer
 
@@ -849,14 +919,20 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
 
     // Create a new topic for this session
     try {
-      const newTopic = await bot.api.createForumTopic(chatId, matchingSession.name)
+      // Build topic name: <project>-<session title> or just <project> if no title
+      const projectName = matchingSession.directory.split('/').pop() || 'project'
+      // If name differs from projectName, it's the session title
+      const sessionTitle = matchingSession.name !== projectName ? matchingSession.name : null
+      const topicName = sessionTitle ? `${projectName}-${sessionTitle}` : projectName
+      
+      const newTopic = await bot.api.createForumTopic(chatId, topicName)
       const topicId = newTopic.message_thread_id
 
       // Register the session with the stream handler
       streamHandler.registerSession(matchingSession.sessionId, chatId, topicId, true)
 
       // Create topic mapping
-      topicStore.createMapping(chatId, topicId, matchingSession.name, matchingSession.sessionId, {})
+      topicStore.createMapping(chatId, topicId, topicName, matchingSession.sessionId, {})
       topicStore.updateWorkDir(chatId, topicId, matchingSession.directory)
       topicStore.toggleStreaming(chatId, topicId, true)
 
