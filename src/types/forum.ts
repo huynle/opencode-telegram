@@ -107,7 +107,7 @@ export interface TopicMappingWithStats extends TopicMapping {
  * Configuration for the topic manager
  */
 export interface TopicManagerConfig {
-  // Database path for SQLite persistence
+  // Database path for SQLite persistence (ignored if store is provided)
   databasePath: string
   
   // Whether to auto-create sessions for new topics
@@ -121,10 +121,6 @@ export interface TopicManagerConfig {
   
   // General topic handling (message_thread_id = undefined)
   handleGeneralTopic: boolean
-  
-  // Session cleanup
-  sessionTimeoutMs?: number         // Auto-close sessions after inactivity
-  cleanupIntervalMs?: number        // How often to check for stale sessions
 }
 
 /**

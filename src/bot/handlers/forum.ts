@@ -361,6 +361,22 @@ export interface CreateTopicResult {
 /**
  * Options for forum commands
  */
+/**
+ * Information about a managed project directory
+ */
+export interface ManagedProjectInfo {
+  /** Directory name */
+  name: string
+  /** Full path to the directory */
+  path: string
+  /** Whether an active session exists for this project */
+  hasActiveSession: boolean
+  /** Topic ID if linked */
+  topicId?: number
+  /** Session ID if active */
+  sessionId?: string
+}
+
 export interface ForumCommandOptions {
   topicManager: TopicManager
   /** If true, General topic acts as control plane for creating new topics */
@@ -381,6 +397,8 @@ export interface ForumCommandOptions {
   cleanupStaleSession?: (chatId: number, topicId: number) => Promise<boolean>
   /** Callback to create a new topic with directory and OpenCode instance */
   createTopicWithInstance?: (chatId: number, topicName: string) => Promise<CreateTopicResult>
+  /** Callback to list managed project directories */
+  getManagedProjects?: () => Promise<ManagedProjectInfo[]>
 }
 
 /**
@@ -459,6 +477,7 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
     findStaleSessions,
     cleanupStaleSession,
     createTopicWithInstance,
+    getManagedProjects,
   } = options
   
   // Cache for session list (used by /connect with numbers)
@@ -509,29 +528,7 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
     })
   })
 
-  /**
-   * /topics - List all active topics in this chat
-   */
-  composer.command("topics", async (ctx) => {
-    if (ctx.chat.type !== "supergroup") {
-      return ctx.reply("This command only works in supergroups with forum topics enabled.")
-    }
 
-    const topics = topicManager.getActiveTopics(ctx.chat.id)
-
-    if (topics.length === 0) {
-      return ctx.reply("No active OpenCode sessions in this chat.")
-    }
-
-    const lines = topics.map((t, i) => 
-      `${i + 1}. *${t.topicName}* - \`${t.sessionId.slice(0, 8)}...\``
-    )
-
-    return ctx.reply(
-      `*Active Topics (${topics.length})*\n\n${lines.join("\n")}`,
-      { parse_mode: "Markdown" }
-    )
-  })
 
   /**
    * /sessions - List all active OpenCode sessions (managed + external)
@@ -609,6 +606,79 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
     } catch (error) {
       console.error("[ForumCommands] Error listing sessions:", error)
       return ctx.reply(`Error listing sessions: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
+
+  /**
+   * /managed-projects - List all managed project directories that can have OpenCode sessions
+   */
+  composer.command("managed_projects", async (ctx) => {
+    if (ctx.chat.type !== "supergroup") {
+      return ctx.reply("This command only works in supergroups with forum topics enabled.")
+    }
+
+    const topicId = ctx.message?.message_thread_id ?? 0
+    
+    // Only allow in General topic
+    if (topicId !== 0) {
+      return ctx.reply(
+        "Use `/managed_projects` in the General topic to list available projects.",
+        { 
+          parse_mode: "Markdown",
+          message_thread_id: topicId 
+        }
+      )
+    }
+
+    if (!getManagedProjects) {
+      return ctx.reply("Managed projects listing not available.")
+    }
+
+    try {
+      const projects = await getManagedProjects()
+
+      if (projects.length === 0) {
+        return ctx.reply(
+          "*No Managed Projects*\n\n" +
+          "No project directories found.\n\n" +
+          "Use `/new <name>` to create a new project.",
+          { parse_mode: "Markdown" }
+        )
+      }
+
+      const lines: string[] = []
+      lines.push(`*Managed Projects (${projects.length})*`)
+      lines.push("")
+
+      for (let i = 0; i < projects.length; i++) {
+        const p = projects[i]
+        const statusIcon = p.hasActiveSession ? "🟢" : "⚪"
+        const linkedIcon = p.topicId ? " 🔗" : ""
+        
+        lines.push(`*${i + 1}.* ${statusIcon} *${p.name}*${linkedIcon}`)
+        lines.push(`    📁 \`${p.path}\``)
+        if (p.sessionId) {
+          lines.push(`    🔑 \`${p.sessionId.slice(0, 12)}...\``)
+        }
+      }
+
+      lines.push("")
+      lines.push("_Icons: 🟢 active session | ⚪ no session | 🔗 linked to topic_")
+      lines.push("")
+      lines.push("*Commands:*")
+      lines.push("`/new <name>` - Create new project")
+      lines.push("`/sessions` - View active sessions")
+
+      // Safety check: Telegram has 4096 char limit
+      let message = lines.join("\n")
+      if (message.length > 4000) {
+        message = message.slice(0, 3900) + "\n\n_...truncated (too many projects)_"
+      }
+
+      return ctx.reply(message, { parse_mode: "Markdown" })
+    } catch (error) {
+      console.error("[ForumCommands] Error listing managed projects:", error)
+      return ctx.reply(`Error listing projects: ${error instanceof Error ? error.message : String(error)}`)
     }
   })
 
@@ -873,48 +943,7 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
     }
   })
 
-  /**
-   * /newsession - Force create a new session for this topic
-   */
-  composer.command("newsession", async (ctx) => {
-    if (ctx.chat.type !== "supergroup") {
-      return ctx.reply("This command only works in supergroups with forum topics enabled.")
-    }
 
-    const topicId = ctx.message?.message_thread_id ?? 0
-    const existing = topicManager.getMapping(ctx.chat.id, topicId)
-
-    if (existing) {
-      return ctx.reply(
-        `A session already exists for this topic.\n` +
-        `Session ID: \`${existing.sessionId.slice(0, 8)}...\`\n\n` +
-        `Close and reopen the topic to create a new session.`,
-        { 
-          parse_mode: "Markdown",
-          message_thread_id: topicId || undefined 
-        }
-      )
-    }
-
-    const topicName = topicId === 0 ? "General" : `Topic ${topicId}`
-    const result = await topicManager.createSessionForTopic(ctx.chat.id, topicId, topicName)
-
-    if (result.success && result.mapping) {
-      return ctx.reply(
-        `New session created!\n` +
-        `Session ID: \`${result.mapping.sessionId.slice(0, 8)}...\``,
-        { 
-          parse_mode: "Markdown",
-          message_thread_id: topicId || undefined 
-        }
-      )
-    } else {
-      return ctx.reply(
-        `Failed to create session: ${result.error}`,
-        { message_thread_id: topicId || undefined }
-      )
-    }
-  })
 
   /**
    * /new <name> - Create a new forum topic with directory and OpenCode instance
@@ -1174,17 +1203,16 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
         "📚 *OpenCode Bot - Command Reference*",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "📁 *CREATE NEW PROJECT*",
+        "📁 *PROJECTS*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "`/new <name>` - Create folder + topic + start OpenCode",
-        "`/topics` - List all active topics in this chat",
+        "`/managed_projects` - List all project directories",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "🔗 *ATTACH TO EXISTING SESSION*",
+        "🔗 *SESSIONS*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "`/sessions` - List all sessions (numbered)",
-        "`/connect <#>` - Attach to session by number (no folder)",
-        "`/disconnect` - Unlink & delete topic (run in topic)",
+        "`/connect <#>` - Attach to session by number",
         "`/clear` - Clean up stale topic mappings",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
@@ -1197,7 +1225,7 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
         "💡 *HOW IT WORKS*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "• `/new myproject` creates ~/oc-bot/myproject + starts OpenCode",
-        "• `/connect 1` attaches to existing session #1 (no folder)",
+        "• `/connect 1` attaches to existing session #1",
         "• `/disconnect` (in topic) unlinks and deletes the topic",
         "• Sessions persist until idle timeout (30 min)",
         "",
@@ -1217,11 +1245,6 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
         "`/disconnect` - Unlink & delete this topic",
         "`/link <path>` - Link to project directory",
         "`/stream` - Toggle real-time streaming",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "📁 *NAVIGATION*",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "`/topics` - List all active topics",
         "`/help` - Show this help menu",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",

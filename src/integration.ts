@@ -23,6 +23,7 @@ import {
   type DisconnectResult,
   type StaleSessionInfo,
   type CreateTopicResult,
+  type ManagedProjectInfo,
 } from "./bot/handlers/forum"
 import { 
   OpenCodeClient, 
@@ -276,11 +277,12 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
     await sendToTopic(bot, chatId, topicId, response)
   }
 
-  // Create topic manager
+  // Create topic manager (pass the shared topicStore)
   const topicManager = new TopicManager(
     openCodeAdapter,
     responseHandler,
-    toTopicManagerConfig(config)
+    toTopicManagerConfig(config),
+    topicStore  // Share the same store instance
   )
 
   // Handle orchestrator events
@@ -1296,6 +1298,53 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
     }
   }
 
+  // Helper to list all managed project directories
+  async function getManagedProjects(): Promise<ManagedProjectInfo[]> {
+    const projects: ManagedProjectInfo[] = []
+    const basePath = config.project.basePath
+
+    try {
+      // Read the project base directory
+      const result = await Bun.$`ls -1 ${basePath} 2>/dev/null`.quiet()
+      const dirNames = result.stdout.toString().trim().split('\n').filter(Boolean)
+
+      // Get all active sessions for cross-referencing
+      const activeSessions = await getActiveSessions()
+
+      for (const name of dirNames) {
+        const fullPath = `${basePath}/${name}`
+        
+        // Check if it's a directory
+        try {
+          const isDir = await Bun.$`test -d ${fullPath}`.quiet()
+          if (isDir.exitCode !== 0) continue
+        } catch {
+          continue
+        }
+
+        // Check if there's an active session for this directory
+        const matchingSession = activeSessions.find(s => 
+          s.directory === fullPath || s.directory.endsWith(`/${name}`)
+        )
+
+        projects.push({
+          name,
+          path: fullPath,
+          hasActiveSession: !!matchingSession,
+          topicId: matchingSession?.topicId,
+          sessionId: matchingSession?.sessionId,
+        })
+      }
+
+      // Sort alphabetically by name
+      projects.sort((a, b) => a.name.localeCompare(b.name))
+    } catch (error) {
+      console.error('[Integration] Error listing managed projects:', error)
+    }
+
+    return projects
+  }
+
   // Register forum commands FIRST (before text handlers so /commands are processed)
   bot.use(createForumCommands({ 
     topicManager, 
@@ -1307,6 +1356,7 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
     findStaleSessions,
     cleanupStaleSession,
     createTopicWithInstance,
+    getManagedProjects,
     onStreamingToggle: (chatId, topicId, enabled) => {
       // Find the session for this topic and update streaming preference
       const mapping = topicStore.getMapping(chatId, topicId)
@@ -1335,11 +1385,11 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
   }))
 
   // Register forum handlers
-  // General topic connects to OpenCode instance at /tmp for direct conversations
+  // General topic is control plane only - use /new to create topics for OpenCode sessions
   bot.use(createForumHandlers({
     topicManager,
     handleGeneralTopic: true,
-    generalAsControlPlane: false,  // General topic routes to OpenCode (at /tmp)
+    generalAsControlPlane: true,  // General topic is control plane only (no OpenCode routing)
     allowedChatIds: config.telegram.chatId ? [config.telegram.chatId] : undefined,
     allowedUserIds: config.telegram.allowedUserIds.length > 0 ? config.telegram.allowedUserIds : undefined,
   }))

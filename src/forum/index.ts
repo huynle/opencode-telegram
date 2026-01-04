@@ -167,9 +167,6 @@ export async function createForumBot(options: ForumBotOptions) {
     ...topicManagerConfig,
   })
 
-  // Recover state if there are existing mappings
-  await topicManager.recoverState()
-
   // Register forum handlers
   bot.use(createForumHandlers({
     topicManager,

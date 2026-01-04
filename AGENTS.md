@@ -188,13 +188,13 @@ GET  /event                   # SSE event stream
 
 #### General Topic (Control Plane)
 ```
-/new <name>      - Create folder in oc-bot/ + topic + start OpenCode
-/topics          - List all active topics in this chat
-/sessions        - List all OpenCode sessions (managed + discovered)
-/connect <name>  - Attach to existing session (no folder created)
-/clear           - Clean up stale topic mappings
-/status          - Show orchestrator status
-/help            - Show context-aware help
+/new <name>         - Create folder in oc-bot/ + topic + start OpenCode
+/managed_projects   - List all project directories in oc-bot/
+/sessions           - List all OpenCode sessions (managed + discovered)
+/connect <#>        - Attach to existing session by number
+/clear              - Clean up stale topic mappings
+/status             - Show orchestrator status
+/help               - Show context-aware help
 ```
 
 **Key difference:**
@@ -204,7 +204,7 @@ GET  /event                   # SSE event stream
 #### Inside a Topic (Session)
 ```
 /session         - Show current topic's OpenCode session info
-/newsession      - Force create a new session (if none exists)
+/disconnect      - Unlink & delete this topic
 /link <path>     - Link topic to existing project directory
 /stream          - Toggle real-time streaming on/off
 /help            - Show context-aware help
@@ -333,3 +333,12 @@ When running inside OpenCode, use the tmux tools directly:
 4. **Duplicate message fix** - Ignores "message is not modified" errors
 5. **Instance ready on restart** - Emits event after successful restart
 6. **Final response editing** - Edits progress message instead of sending new one
+
+## Cleanup Changes (Code Simplification)
+
+1. **Removed `/topics` command** - Redundant with `/sessions` which shows more info
+2. **Removed `/newsession` command** - Sessions are auto-created, this was confusing
+3. **Consolidated TopicStore** - Single shared instance instead of two separate ones
+4. **Removed duplicate cleanup timer** - TopicManager no longer has its own cleanup
+5. **Simplified General topic** - Now purely control plane (no OpenCode routing)
+6. **Removed unused methods** - `recoverState()` and `createSessionForTopic()` from TopicManager
