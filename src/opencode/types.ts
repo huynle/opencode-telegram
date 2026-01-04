@@ -367,6 +367,19 @@ export const DEFAULT_CLIENT_CONFIG: Required<OpenCodeClientConfig> = {
 // =============================================================================
 
 /**
+ * Token usage info
+ */
+export interface TokenUsage {
+  input: number
+  output: number
+  reasoning?: number
+  cache?: {
+    read: number
+    write: number
+  }
+}
+
+/**
  * Streaming state for a session
  */
 export interface StreamingState {
@@ -399,6 +412,18 @@ export interface StreamingState {
   
   /** Error if any */
   error?: string
+  
+  /** Token usage from message.updated events */
+  tokens?: TokenUsage
+  
+  /** Model info */
+  model?: {
+    providerID: string
+    modelID: string
+  }
+  
+  /** Flag to prevent duplicate message sends */
+  pendingSend?: boolean
 }
 
 /**

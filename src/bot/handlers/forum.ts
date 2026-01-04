@@ -348,6 +348,17 @@ export function createForumHandlers(options: ForumHandlerOptions): Composer<Cont
 // ============================================================================
 
 /**
+ * Result of creating a new topic with OpenCode instance
+ */
+export interface CreateTopicResult {
+  success: boolean
+  topicId?: number
+  sessionId?: string
+  directory?: string
+  error?: string
+}
+
+/**
  * Options for forum commands
  */
 export interface ForumCommandOptions {
@@ -358,6 +369,73 @@ export interface ForumCommandOptions {
   topicStore?: import("../../forum/topic-store").TopicStore
   /** Callback when streaming preference changes */
   onStreamingToggle?: (chatId: number, topicId: number, enabled: boolean) => void
+  /** Callback to get all active sessions (managed + external) */
+  getActiveSessions?: () => Promise<ActiveSessionInfo[]>
+  /** Callback to connect General topic to an existing session */
+  connectToSession?: (chatId: number, sessionIdentifier: string) => Promise<ConnectResult>
+  /** Callback to disconnect/delete a topic linked to a session */
+  disconnectSession?: (chatId: number, topicId: number) => Promise<DisconnectResult>
+  /** Callback to find and clean up stale topic mappings */
+  findStaleSessions?: (chatId: number) => Promise<StaleSessionInfo[]>
+  /** Callback to clean up a stale session */
+  cleanupStaleSession?: (chatId: number, topicId: number) => Promise<boolean>
+  /** Callback to create a new topic with directory and OpenCode instance */
+  createTopicWithInstance?: (chatId: number, topicName: string) => Promise<CreateTopicResult>
+}
+
+/**
+ * Result of disconnecting a session
+ */
+export interface DisconnectResult {
+  success: boolean
+  topicDeleted?: boolean
+  error?: string
+}
+
+/**
+ * Information about a stale session (topic linked to dead session)
+ */
+export interface StaleSessionInfo {
+  topicId: number
+  topicName: string
+  sessionId: string
+  directory?: string
+  reason: "port_dead" | "session_missing" | "instance_stopped"
+}
+
+/**
+ * Information about an active session
+ */
+export interface ActiveSessionInfo {
+  /** Session ID */
+  sessionId: string
+  /** Project/topic name */
+  name: string
+  /** Working directory */
+  directory: string
+  /** Topic ID if linked to a topic */
+  topicId?: number
+  /** Whether this is an external instance (registered via API) */
+  isExternal: boolean
+  /** Whether this was discovered (not managed or registered) */
+  isDiscovered?: boolean
+  /** Port number */
+  port?: number
+  /** Last activity timestamp */
+  lastActivity?: Date
+  /** Session status */
+  status: "running" | "idle" | "stopped" | "unknown"
+}
+
+/**
+ * Result of connecting to a session
+ */
+export interface ConnectResult {
+  success: boolean
+  sessionId?: string
+  topicId?: number
+  topicUrl?: string
+  error?: string
 }
 
 /**
@@ -370,7 +448,21 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
   const options: ForumCommandOptions = 'topicManager' in topicManagerOrOptions 
     ? topicManagerOrOptions 
     : { topicManager: topicManagerOrOptions }
-  const { topicManager, generalAsControlPlane = false, topicStore, onStreamingToggle } = options
+  const { 
+    topicManager, 
+    generalAsControlPlane = false, 
+    topicStore, 
+    onStreamingToggle,
+    getActiveSessions,
+    connectToSession,
+    disconnectSession,
+    findStaleSessions,
+    cleanupStaleSession,
+    createTopicWithInstance,
+  } = options
+  
+  // Cache for session list (used by /connect with numbers)
+  let lastSessionList: ActiveSessionInfo[] = []
 
   /**
    * /session - Get info about the current topic's session
@@ -442,6 +534,346 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
   })
 
   /**
+   * /sessions - List all active OpenCode sessions (managed + external)
+   * Shows numbered sessions that can be connected to with /connect <number>
+   */
+  composer.command("sessions", async (ctx) => {
+    if (ctx.chat.type !== "supergroup") {
+      return ctx.reply("This command only works in supergroups with forum topics enabled.")
+    }
+
+    if (!getActiveSessions) {
+      return ctx.reply("Session listing not available.")
+    }
+
+    try {
+      const sessions = await getActiveSessions()
+      
+      // Cache for /connect command
+      lastSessionList = sessions
+
+      if (sessions.length === 0) {
+        return ctx.reply(
+          "*No Active Sessions*\n\n" +
+          "No OpenCode sessions are currently running.\n\n" +
+          "• Use `/new <name>` to create a new topic\n" +
+          "• Or link an external OpenCode with `/telegram-link`",
+          { parse_mode: "Markdown" }
+        )
+      }
+
+      const lines: string[] = []
+      lines.push(`*Active Sessions (${sessions.length})*`)
+      lines.push("")
+
+      // Helper to format a session entry with number
+      const formatSession = (s: ActiveSessionInfo, index: number) => {
+        const statusIcon = s.status === "running" ? "🟢" : s.status === "idle" ? "🟡" : "⚪"
+        const projectName = s.directory.split("/").pop() || s.name
+        const sessionTitle = s.name !== projectName ? ` _(${s.name})_` : ""
+        const linkedIcon = s.topicId ? " 🔗" : ""
+        const typeIcon = s.isDiscovered ? "🔍" : s.isExternal ? "🔗" : "📦"
+        
+        const result: string[] = []
+        result.push(`*${index}.* ${statusIcon} ${typeIcon} *${projectName}*${sessionTitle}${linkedIcon}`)
+        result.push(`    📁 \`${s.directory}\``)
+        if (s.port) {
+          result.push(`    🔌 Port ${s.port}`)
+        }
+        return result
+      }
+
+      // Show all sessions with numbers
+      let index = 1
+      for (const s of sessions) {
+        lines.push(...formatSession(s, index))
+        index++
+      }
+      lines.push("")
+
+      // Legend
+      lines.push("_Icons: 📦 managed | 🔗 external | 🔍 discovered_")
+      lines.push("")
+      lines.push("*Commands:*")
+      lines.push("`/connect <#>` - Link session to new topic")
+      lines.push("`/disconnect` - Unlink current topic (run in topic)")
+
+      // Safety check: Telegram has 4096 char limit
+      let message = lines.join("\n")
+      if (message.length > 4000) {
+        // Truncate and add indicator
+        message = message.slice(0, 3900) + "\n\n_...truncated (too many sessions)_"
+      }
+
+      return ctx.reply(message, { parse_mode: "Markdown" })
+    } catch (error) {
+      console.error("[ForumCommands] Error listing sessions:", error)
+      return ctx.reply(`Error listing sessions: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
+
+  /**
+   * /connect <number-or-name> - Connect to an existing session from General topic
+   * Creates a new topic linked to the session
+   */
+  composer.command("connect", async (ctx) => {
+    if (ctx.chat.type !== "supergroup") {
+      return ctx.reply("This command only works in supergroups with forum topics enabled.")
+    }
+
+    const topicId = ctx.message?.message_thread_id ?? 0
+    
+    // Only allow in General topic
+    if (topicId !== 0) {
+      return ctx.reply(
+        "Use `/connect` in the General topic to connect to existing sessions.",
+        { 
+          parse_mode: "Markdown",
+          message_thread_id: topicId 
+        }
+      )
+    }
+
+    if (!connectToSession) {
+      return ctx.reply("Session connection not available.")
+    }
+
+    // Get session identifier from command arguments
+    const args = ctx.message?.text?.split(/\s+/).slice(1).join(" ").trim()
+    if (!args) {
+      return ctx.reply(
+        "*Connect to a session*\n\n" +
+        "Usage: `/connect <number>` or `/connect <name>`\n\n" +
+        "Examples:\n" +
+        "• `/connect 1` - Connect to session #1\n" +
+        "• `/connect my-project` - Connect by name\n\n" +
+        "_Run `/sessions` first to see the list_",
+        { parse_mode: "Markdown" }
+      )
+    }
+
+    try {
+      let sessionIdentifier = args
+      
+      // Check if it's a number (index from /sessions list)
+      const num = parseInt(args, 10)
+      if (!isNaN(num) && num > 0) {
+        // Refresh session list if empty
+        if (lastSessionList.length === 0 && getActiveSessions) {
+          lastSessionList = await getActiveSessions()
+        }
+        
+        if (num > lastSessionList.length) {
+          return ctx.reply(
+            `❌ Invalid number. Run \`/sessions\` to see available sessions (1-${lastSessionList.length}).`,
+            { parse_mode: "Markdown" }
+          )
+        }
+        
+        const session = lastSessionList[num - 1]
+        sessionIdentifier = session.sessionId
+        
+        // Show what we're connecting to
+        const projectName = session.directory.split("/").pop() || session.name
+        await ctx.reply(
+          `Connecting to *${projectName}*...`,
+          { parse_mode: "Markdown" }
+        )
+      }
+
+      const result = await connectToSession(ctx.chat.id, sessionIdentifier)
+
+      if (!result.success) {
+        return ctx.reply(
+          `❌ *Connection Failed*\n\n${result.error}`,
+          { parse_mode: "Markdown" }
+        )
+      }
+
+      return ctx.reply(
+        `✅ *Connected!*\n\n` +
+        (result.topicUrl 
+          ? `[Open Topic](${result.topicUrl})`
+          : `Topic ID: ${result.topicId}`),
+        { 
+          parse_mode: "Markdown",
+          link_preview_options: { is_disabled: true }
+        }
+      )
+    } catch (error) {
+      console.error("[ForumCommands] Error connecting to session:", error)
+      return ctx.reply(`Error: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
+
+  /**
+   * /disconnect - Disconnect current topic from its session and delete the topic
+   * Must be run from within a topic (not General)
+   */
+  composer.command("disconnect", async (ctx) => {
+    if (ctx.chat.type !== "supergroup") {
+      return ctx.reply("This command only works in supergroups with forum topics enabled.")
+    }
+
+    const topicId = ctx.message?.message_thread_id ?? 0
+    
+    // Must be in a topic, not General
+    if (topicId === 0) {
+      return ctx.reply(
+        "Run `/disconnect` from within a topic to unlink and delete it.",
+        { parse_mode: "Markdown" }
+      )
+    }
+
+    if (!disconnectSession) {
+      return ctx.reply(
+        "Disconnect not available.",
+        { message_thread_id: topicId }
+      )
+    }
+
+    // Check if topic has a session
+    const mapping = topicManager.getMapping(ctx.chat.id, topicId)
+    if (!mapping) {
+      return ctx.reply(
+        "This topic is not linked to any session.",
+        { message_thread_id: topicId }
+      )
+    }
+
+    try {
+      // Confirm action
+      await ctx.reply(
+        `⚠️ *Disconnecting...*\n\nUnlinking session and deleting this topic.`,
+        { 
+          parse_mode: "Markdown",
+          message_thread_id: topicId 
+        }
+      )
+
+      const result = await disconnectSession(ctx.chat.id, topicId)
+
+      if (!result.success) {
+        return ctx.reply(
+          `❌ *Disconnect Failed*\n\n${result.error}`,
+          { 
+            parse_mode: "Markdown",
+            message_thread_id: topicId 
+          }
+        )
+      }
+
+      // If topic was deleted, we can't reply to it
+      // The success message will be in General topic or just logged
+      if (!result.topicDeleted) {
+        return ctx.reply(
+          `✅ Session unlinked. Topic kept.`,
+          { message_thread_id: topicId }
+        )
+      }
+      
+      // Topic deleted - no reply possible, but we could notify General
+      console.log(`[ForumCommands] Topic ${topicId} disconnected and deleted`)
+    } catch (error) {
+      console.error("[ForumCommands] Error disconnecting session:", error)
+      return ctx.reply(
+        `Error: ${error instanceof Error ? error.message : String(error)}`,
+        { message_thread_id: topicId }
+      )
+    }
+  })
+
+  /**
+   * /clear - Find and clean up stale topic mappings (topics linked to dead sessions)
+   */
+  composer.command("clear", async (ctx) => {
+    if (ctx.chat.type !== "supergroup") {
+      return ctx.reply("This command only works in supergroups with forum topics enabled.")
+    }
+
+    const topicId = ctx.message?.message_thread_id ?? 0
+    
+    // Only allow in General topic
+    if (topicId !== 0) {
+      return ctx.reply(
+        "Use `/clear` in the General topic to clean up stale sessions.",
+        { 
+          parse_mode: "Markdown",
+          message_thread_id: topicId 
+        }
+      )
+    }
+
+    if (!findStaleSessions || !cleanupStaleSession) {
+      return ctx.reply("Stale session cleanup not available.")
+    }
+
+    try {
+      // Find stale sessions
+      const staleSessions = await findStaleSessions(ctx.chat.id)
+
+      if (staleSessions.length === 0) {
+        return ctx.reply(
+          "✅ *No stale sessions found*\n\n" +
+          "All topic mappings are connected to active sessions.",
+          { parse_mode: "Markdown" }
+        )
+      }
+
+      // Show what will be cleaned up
+      const lines: string[] = []
+      lines.push(`🧹 *Found ${staleSessions.length} stale session(s)*`)
+      lines.push("")
+
+      for (const stale of staleSessions) {
+        const reasonText = {
+          port_dead: "Port not responding",
+          session_missing: "Session no longer exists",
+          instance_stopped: "Instance stopped",
+        }[stale.reason]
+        
+        lines.push(`• *${stale.topicName}* (Topic ${stale.topicId})`)
+        lines.push(`  Reason: ${reasonText}`)
+        if (stale.directory) {
+          lines.push(`  Dir: \`${stale.directory}\``)
+        }
+      }
+
+      lines.push("")
+      lines.push("_Cleaning up..._")
+
+      await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" })
+
+      // Clean up each stale session
+      let cleaned = 0
+      let failed = 0
+
+      for (const stale of staleSessions) {
+        try {
+          const success = await cleanupStaleSession(ctx.chat.id, stale.topicId)
+          if (success) {
+            cleaned++
+          } else {
+            failed++
+          }
+        } catch {
+          failed++
+        }
+      }
+
+      return ctx.reply(
+        `✅ *Cleanup Complete*\n\n` +
+        `Cleaned: ${cleaned}\n` +
+        (failed > 0 ? `Failed: ${failed}` : ""),
+        { parse_mode: "Markdown" }
+      )
+    } catch (error) {
+      console.error("[ForumCommands] Error cleaning stale sessions:", error)
+      return ctx.reply(`Error: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
+
+  /**
    * /newsession - Force create a new session for this topic
    */
   composer.command("newsession", async (ctx) => {
@@ -485,7 +917,8 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
   })
 
   /**
-   * /new <name> - Create a new forum topic (only works in General topic when generalAsControlPlane is true)
+   * /new <name> - Create a new forum topic with directory and OpenCode instance
+   * (only works in General topic when generalAsControlPlane is true)
    */
   composer.command("new", async (ctx) => {
     if (ctx.chat.type !== "supergroup") {
@@ -509,15 +942,50 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
       return ctx.reply(
         "*Create a new topic*\n\n" +
         "Usage: `/new <topic-name>`\n\n" +
-        "Example: `/new my-project`",
+        "Example: `/new my-project`\n\n" +
+        "_This will create a new folder and start an OpenCode instance._",
         { parse_mode: "Markdown" }
       )
     }
 
     const topicName = args
 
+    // Use the callback if available (creates directory + starts instance)
+    if (createTopicWithInstance) {
+      try {
+        await ctx.reply(`Creating topic *${topicName}*...`, { parse_mode: "Markdown" })
+        
+        const result = await createTopicWithInstance(ctx.chat.id, topicName)
+        
+        if (!result.success) {
+          return ctx.reply(
+            `❌ *Failed to create topic*\n\n${result.error}`,
+            { parse_mode: "Markdown" }
+          )
+        }
+
+        const positiveId = String(ctx.chat.id).replace(/^-100/, "")
+        const topicUrl = `https://t.me/c/${positiveId}/${result.topicId}`
+
+        return ctx.reply(
+          `✅ *Topic created!*\n\n` +
+          `*Name:* ${topicName}\n` +
+          `*Directory:* \`${result.directory}\`\n` +
+          `*Session:* \`${result.sessionId?.slice(0, 12)}...\`\n\n` +
+          `[Open Topic](${topicUrl})`,
+          { 
+            parse_mode: "Markdown",
+            link_preview_options: { is_disabled: true }
+          }
+        )
+      } catch (error) {
+        console.error(`[ForumCommands] Failed to create topic with instance: ${error}`)
+        return ctx.reply(`Failed to create topic: ${error instanceof Error ? error.message : String(error)}`)
+      }
+    }
+
+    // Fallback: just create the topic (old behavior)
     try {
-      // Create the forum topic using Telegram API
       const newTopic = await ctx.api.createForumTopic(ctx.chat.id, topicName)
       
       console.log(`[ForumCommands] Created new topic: "${topicName}" (${newTopic.message_thread_id})`)
@@ -706,24 +1174,32 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
         "📚 *OpenCode Bot - Command Reference*",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "📁 *TOPIC MANAGEMENT*",
+        "📁 *CREATE NEW PROJECT*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "`/new <name>` - Create a new topic with OpenCode session",
-        "`/topics` - List all active topics and sessions",
+        "`/new <name>` - Create folder + topic + start OpenCode",
+        "`/topics` - List all active topics in this chat",
+        "",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "🔗 *ATTACH TO EXISTING SESSION*",
+        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
+        "`/sessions` - List all sessions (numbered)",
+        "`/connect <#>` - Attach to session by number (no folder)",
+        "`/disconnect` - Unlink & delete topic (run in topic)",
+        "`/clear` - Clean up stale topic mappings",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "🖥️ *SYSTEM*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "`/status` - Show orchestrator status and running instances",
+        "`/status` - Show orchestrator status",
         "`/help` - Show this help menu",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "💡 *HOW IT WORKS*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "• Each forum topic gets its own OpenCode instance",
+        "• `/new myproject` creates ~/oc-bot/myproject + starts OpenCode",
+        "• `/connect 1` attaches to existing session #1 (no folder)",
+        "• `/disconnect` (in topic) unlinks and deletes the topic",
         "• Sessions persist until idle timeout (30 min)",
-        "• Crashed instances auto-restart",
-        "• Close a topic to pause its session",
         "",
         "_Go to any topic and send a message to start coding!_",
       ].join("\n")
@@ -737,30 +1213,22 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "📊 *SESSION*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "`/session` - Show current session details and stats",
-        "`/newsession` - Force create a new session (if none exists)",
-        "`/link <path>` - Link topic to existing project directory",
-        "`/stream` - Toggle real-time response streaming",
+        "`/session` - Show current session details",
+        "`/disconnect` - Unlink & delete this topic",
+        "`/link <path>` - Link to project directory",
+        "`/stream` - Toggle real-time streaming",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "📁 *NAVIGATION*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "`/topics` - List all active topics",
-        "`/status` - Show orchestrator status",
         "`/help` - Show this help menu",
         "",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "💬 *CHATTING WITH OPENCODE*",
+        "💬 *USAGE*",
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
         "• Just type your message - no command needed!",
-        "• Use `/stream` to see responses as they generate",
         "• Tool calls are displayed as they happen",
-        "",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "💡 *TIPS*",
-        "━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
-        "• Use `/link` to work on existing projects",
-        "• Use `/stream` to watch AI think in real-time",
         "• Session auto-stops after 30 min of inactivity",
       ].join("\n")
 

@@ -456,6 +456,29 @@ export class ApiServer {
     return undefined
   }
 
+  /**
+   * Get all external instances (for session listing)
+   */
+  getExternalInstances(): Array<{
+    projectPath: string
+    projectName: string
+    topicId: number
+    sessionId: string
+    opencodePort: number
+    registeredAt: Date
+    lastActivityAt: Date
+  }> {
+    return Array.from(this.externalInstances.values()).map((i) => ({
+      projectPath: i.projectPath,
+      projectName: i.projectName,
+      topicId: i.topicId,
+      sessionId: i.sessionId,
+      opencodePort: i.opencodePort,
+      registeredAt: i.registeredAt,
+      lastActivityAt: i.lastActivityAt,
+    }))
+  }
+
   // ===========================================================================
   // Helpers
   // ===========================================================================

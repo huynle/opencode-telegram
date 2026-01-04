@@ -186,14 +186,29 @@ GET  /event                   # SSE event stream
 ```
 
 ### Telegram Bot Commands
+
+#### General Topic (Control Plane)
 ```
-/session  - Show current topic's OpenCode session info
-/topics   - List all active topics with sessions
-/status   - Show orchestrator status
-/new      - Create a new topic (in General topic)
-/link     - Link topic to existing project directory
-/stream   - Toggle real-time streaming on/off
-/help     - Show context-aware help
+/new <name>      - Create folder in oc-bot/ + topic + start OpenCode
+/topics          - List all active topics in this chat
+/sessions        - List all OpenCode sessions (managed + discovered)
+/connect <name>  - Attach to existing session (no folder created)
+/clear           - Clean up stale topic mappings
+/status          - Show orchestrator status
+/help            - Show context-aware help
+```
+
+**Key difference:**
+- `/new myproject` → Creates `~/oc-bot/myproject/`, creates topic, starts OpenCode instance
+- `/connect 1` → Just attaches to existing session #1, no directory created
+
+#### Inside a Topic (Session)
+```
+/session         - Show current topic's OpenCode session info
+/newsession      - Force create a new session (if none exists)
+/link <path>     - Link topic to existing project directory
+/stream          - Toggle real-time streaming on/off
+/help            - Show context-aware help
 ```
 
 ### External Instance API (Port 4200)
@@ -240,6 +255,38 @@ OpenCode will call `telegram_link` which handles the registration.
 ```bash
 /telegram-unlink
 ```
+
+### Session Discovery
+
+The bot can automatically discover all running OpenCode instances on the local machine, even if they weren't started by the bot.
+
+#### How Discovery Works
+
+1. Scans for `opencode` processes using `ps`
+2. Gets their listening ports via `lsof`
+3. Queries each instance's REST API for session info
+4. Filters out already-known sessions (managed + registered)
+
+#### Using Discovery
+
+```
+# In General topic:
+/sessions              # Lists all sessions including discovered ones
+/connect hindsight     # Connect to a discovered session by name
+/connect ses_abc123    # Connect by session ID prefix
+```
+
+Discovered sessions show with a 🔍 icon in `/sessions` output.
+
+#### Cleaning Up Stale Sessions
+
+When sessions die but their topic mappings remain:
+
+```
+/clear                 # Find and remove stale mappings
+```
+
+This checks if each mapped session is still alive and removes dead ones.
 
 ## Tmux Development Environment
 

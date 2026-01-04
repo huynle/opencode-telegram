@@ -102,73 +102,91 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
   // Rate limit state for Telegram API
   let rateLimitedUntil = 0
 
+  // Stale topic cleanup timer
+  let staleCleanupTimer: ReturnType<typeof setInterval> | null = null
+
   // Create Telegram send callback for stream handler with rate limit handling
   const sendCallback: TelegramSendCallback = async (chatId, topicId, text, options) => {
     // Check if we're currently rate limited
     const now = Date.now()
     if (now < rateLimitedUntil) {
       const waitTime = rateLimitedUntil - now
+      // For edits, just throw immediately - stream handler will skip
+      if (options?.editMessageId) {
+        throw new Error(`Rate limited for ${waitTime}ms`)
+      }
       console.log(`[Integration] Rate limited, waiting ${waitTime}ms`)
       await new Promise(resolve => setTimeout(resolve, waitTime))
     }
-
-    const maxRetries = 3
-    let lastError: Error | undefined
 
     // Build reply markup if inline keyboard is provided
     const reply_markup = options?.inlineKeyboard
       ? { inline_keyboard: options.inlineKeyboard }
       : undefined
 
-    for (let attempt = 0; attempt < maxRetries; attempt++) {
-      try {
-        if (options?.editMessageId) {
-          // Edit existing message
-          await bot.api.editMessageText(chatId, options.editMessageId, text, {
-            parse_mode: options.parseMode,
-            reply_markup,
-          })
-          return { messageId: options.editMessageId }
-        } else {
-          // Send new message
-          const result = await bot.api.sendMessage(chatId, text, {
-            message_thread_id: topicId || undefined,
-            parse_mode: options?.parseMode,
-            reply_to_message_id: options?.replyToMessageId,
-            reply_markup,
-          })
-          return { messageId: result.message_id }
-        }
-      } catch (error) {
-        lastError = error instanceof Error ? error : new Error(String(error))
+    try {
+      if (options?.editMessageId) {
+        // Edit existing message - no retries, just fail fast
+        await bot.api.editMessageText(chatId, options.editMessageId, text, {
+          parse_mode: options.parseMode,
+          reply_markup,
+        })
+        return { messageId: options.editMessageId }
+      } else {
+        // Send new message - retry on rate limit
+        const maxRetries = 3
+        let lastError: Error | undefined
         
-        // "message is not modified" is not a real error - return success
-        if (lastError.message.includes('message is not modified')) {
-          return { messageId: options?.editMessageId ?? 0 }
-        }
-        
-        // Check for rate limit (429)
-        if (lastError.message.includes('429') || lastError.message.includes('Too Many Requests')) {
-          // Extract retry_after from error if available
-          const retryMatch = lastError.message.match(/retry after (\d+)/i)
-          const retryAfter = retryMatch ? parseInt(retryMatch[1], 10) : 3
-          
-          rateLimitedUntil = Date.now() + (retryAfter * 1000) + 500 // Add 500ms buffer
-          console.log(`[Integration] Rate limited, will retry after ${retryAfter}s (attempt ${attempt + 1}/${maxRetries})`)
-          
-          if (attempt < maxRetries - 1) {
-            await new Promise(resolve => setTimeout(resolve, retryAfter * 1000 + 500))
-            continue
+        for (let attempt = 0; attempt < maxRetries; attempt++) {
+          try {
+            const result = await bot.api.sendMessage(chatId, text, {
+              message_thread_id: topicId || undefined,
+              parse_mode: options?.parseMode,
+              reply_to_message_id: options?.replyToMessageId,
+              reply_markup,
+            })
+            return { messageId: result.message_id }
+          } catch (error) {
+            lastError = error instanceof Error ? error : new Error(String(error))
+            
+            // Check for rate limit (429)
+            if (lastError.message.includes('429') || lastError.message.includes('Too Many Requests')) {
+              const retryMatch = lastError.message.match(/retry after (\d+)/i)
+              const retryAfter = retryMatch ? parseInt(retryMatch[1], 10) : 3
+              
+              rateLimitedUntil = Date.now() + (retryAfter * 1000) + 500
+              console.log(`[Integration] Rate limited on send, will retry after ${retryAfter}s (attempt ${attempt + 1}/${maxRetries})`)
+              
+              if (attempt < maxRetries - 1) {
+                await new Promise(resolve => setTimeout(resolve, retryAfter * 1000 + 500))
+                continue
+              }
+            }
+            
+            // For non-rate-limit errors, don't retry
+            throw lastError
           }
         }
         
-        // For non-rate-limit errors, don't retry - throw immediately
-        console.error("[Integration] Telegram API error:", lastError.message.slice(0, 100))
         throw lastError
       }
+    } catch (error) {
+      const lastError = error instanceof Error ? error : new Error(String(error))
+      
+      // "message is not modified" is not a real error - return success
+      if (lastError.message.includes('message is not modified')) {
+        return { messageId: options?.editMessageId ?? 0 }
+      }
+      
+      // Update rate limit state for 429 errors
+      if (lastError.message.includes('429') || lastError.message.includes('Too Many Requests')) {
+        const retryMatch = lastError.message.match(/retry after (\d+)/i)
+        const retryAfter = retryMatch ? parseInt(retryMatch[1], 10) : 3
+        rateLimitedUntil = Date.now() + (retryAfter * 1000) + 500
+      }
+      
+      throw lastError
     }
-    
-    throw lastError
   }
 
   // Create Telegram delete callback
@@ -972,6 +990,105 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
     }
   }
 
+  // Auto-cleanup stale topics based on timeout
+  async function runStaleTopicCleanup(): Promise<void> {
+    const chatId = config.telegram.chatId
+    if (!chatId) return
+
+    console.log(`[Integration] Running stale topic cleanup (timeout: ${config.opencode.staleTopicTimeoutMs / 1000 / 60} minutes)`)
+
+    try {
+      // Find stale topics using the topic store's built-in method
+      const staleMappings = topicStore.findStaleSessions(config.opencode.staleTopicTimeoutMs)
+
+      if (staleMappings.length === 0) {
+        console.log(`[Integration] No stale topics found`)
+        return
+      }
+
+      console.log(`[Integration] Found ${staleMappings.length} stale topic(s) to clean up`)
+
+      const cleanedTopics: string[] = []
+      const failedTopics: string[] = []
+
+      for (const mapping of staleMappings) {
+        try {
+          // Clean up SSE subscription if exists
+          const discoveredKey = `discovered_${mapping.topicId}`
+          const abort = sseSubscriptions.get(discoveredKey)
+          if (abort) {
+            abort()
+            sseSubscriptions.delete(discoveredKey)
+          }
+
+          const client = clients.get(discoveredKey)
+          if (client) {
+            client.close()
+            clients.delete(discoveredKey)
+          }
+
+          // Unregister from stream handler
+          streamHandler.unregisterSession(mapping.sessionId)
+
+          // Stop managed instance if exists
+          const managedInstance = instanceManager.getInstanceByTopic(mapping.topicId)
+          if (managedInstance) {
+            await instanceManager.stopInstance(managedInstance.config.instanceId)
+          }
+
+          // Delete the topic mapping
+          topicStore.deleteMapping(chatId, mapping.topicId)
+
+          // Try to delete the Telegram topic
+          try {
+            await bot.api.deleteForumTopic(chatId, mapping.topicId)
+            console.log(`[Integration] Deleted stale topic ${mapping.topicId} (${mapping.topicName})`)
+          } catch (error) {
+            // Topic deletion might fail if it's already deleted
+            console.warn(`[Integration] Could not delete Telegram topic ${mapping.topicId}:`, error)
+          }
+
+          cleanedTopics.push(mapping.topicName)
+        } catch (error) {
+          console.error(`[Integration] Failed to clean up topic ${mapping.topicId}:`, error)
+          failedTopics.push(mapping.topicName)
+        }
+      }
+
+      // Send summary to General topic (topicId = 0 means General)
+      if (cleanedTopics.length > 0 || failedTopics.length > 0) {
+        let message = `*Stale Topic Cleanup*\n\n`
+        
+        if (cleanedTopics.length > 0) {
+          message += `*Cleaned up ${cleanedTopics.length} topic(s):*\n`
+          for (const name of cleanedTopics) {
+            message += `  - ${name}\n`
+          }
+        }
+        
+        if (failedTopics.length > 0) {
+          message += `\n*Failed to clean up ${failedTopics.length} topic(s):*\n`
+          for (const name of failedTopics) {
+            message += `  - ${name}\n`
+          }
+        }
+
+        message += `\n_Topics inactive for ${config.opencode.staleTopicTimeoutMs / 1000 / 60} minutes are automatically cleaned up._`
+
+        try {
+          await bot.api.sendMessage(chatId, message, {
+            parse_mode: "Markdown",
+            // General topic has no message_thread_id
+          })
+        } catch (error) {
+          console.error(`[Integration] Failed to send cleanup summary to General topic:`, error)
+        }
+      }
+    } catch (error) {
+      console.error(`[Integration] Error during stale topic cleanup:`, error)
+    }
+  }
+
   // Helper to disconnect a session and delete its topic
   async function disconnectSession(chatId: number, topicId: number): Promise<{
     success: boolean
@@ -1219,15 +1336,27 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
       }
 
       // Find the client for this session
+      // First try managed instances
+      let client: OpenCodeClient | undefined
       const instanceId = sessionToInstance.get(pending.permission.sessionID)
-      if (!instanceId) {
-        await ctx.answerCallbackQuery({ text: "Session not found" })
-        return
+      if (instanceId) {
+        client = clients.get(instanceId)
       }
-
-      const client = clients.get(instanceId)
+      
+      // If not found, try discovered/reconnected sessions
       if (!client) {
-        await ctx.answerCallbackQuery({ text: "Instance not available" })
+        // Get the topic ID from the stream handler's session registration
+        const destination = streamHandler.getTelegramDestination(pending.permission.sessionID)
+        if (destination) {
+          const discoveredKey = `discovered_${destination.topicId}`
+          client = clients.get(discoveredKey)
+          console.log(`[Integration] Looking for discovered client with key ${discoveredKey}: ${client ? 'found' : 'not found'}`)
+        }
+      }
+      
+      if (!client) {
+        console.error(`[Integration] No client found for session ${pending.permission.sessionID}`)
+        await ctx.answerCallbackQuery({ text: "Session not found" })
         return
       }
 
@@ -1327,6 +1456,15 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
       // Recover orchestrator state
       await instanceManager.recover()
 
+      // Start stale topic cleanup timer
+      if (config.opencode.staleTopicCleanupIntervalMs > 0) {
+        console.log(`[Integration] Starting stale topic cleanup timer (interval: ${config.opencode.staleTopicCleanupIntervalMs / 1000 / 60} minutes)`)
+        staleCleanupTimer = setInterval(
+          () => runStaleTopicCleanup(),
+          config.opencode.staleTopicCleanupIntervalMs
+        )
+      }
+
       // Start bot
       await bot.start({
         allowed_updates: ["message", "edited_message", "callback_query"],
@@ -1338,6 +1476,12 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
 
     async stop() {
       console.log("[Integration] Stopping application...")
+
+      // Stop stale topic cleanup timer
+      if (staleCleanupTimer) {
+        clearInterval(staleCleanupTimer)
+        staleCleanupTimer = null
+      }
 
       // Stop API server
       apiServer.stop()

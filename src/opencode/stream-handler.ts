@@ -16,6 +16,8 @@ import type {
   ToolInvocationPart,
   Permission,
   InlineKeyboardButton,
+  TokenUsage,
+  MessageInfo,
 } from "./types"
 import { DEFAULT_STREAM_HANDLER_CONFIG } from "./types"
 import { markdownToTelegramHtml, truncateForTelegram } from "./telegram-markdown"
@@ -31,7 +33,7 @@ export interface PendingPermission {
 }
 
 /**
- * Manages streaming state and Telegram updates for OpenCode sessions
+ * Streaming state for a session
  */
 export class StreamHandler {
   private readonly config: StreamHandlerConfig
@@ -47,6 +49,15 @@ export class StreamHandler {
 
   /** Pending permission requests - keyed by permissionId */
   private readonly pendingPermissions: Map<string, PendingPermission> = new Map()
+
+  /** Track message roles: messageId -> role */
+  private readonly messageRoles: Map<string, "user" | "assistant"> = new Map()
+
+  /** Track which user messages we've already sent to Telegram (to prevent duplicates) */
+  private readonly sentUserMessages: Set<string> = new Set()
+
+  /** Track messages that originated from Telegram (so we don't echo them back) */
+  private readonly messagesFromTelegram: Set<string> = new Set()
 
   constructor(
     sendCallback: TelegramSendCallback,
@@ -100,6 +111,38 @@ export class StreamHandler {
     return this.sessionToTelegram.get(sessionId)
   }
 
+  /**
+   * Mark a message text as originating from Telegram (so we don't echo it back)
+   * Call this when sending a message from Telegram to OpenCode
+   */
+  markMessageFromTelegram(sessionId: string, messageText: string): void {
+    // Use a composite key of sessionId + normalized text to identify the message
+    const key = `${sessionId}:${messageText.trim()}`
+    this.messagesFromTelegram.add(key)
+    
+    // Clean up old entries to prevent memory leak (keep last 100)
+    if (this.messagesFromTelegram.size > 100) {
+      const entries = Array.from(this.messagesFromTelegram)
+      this.messagesFromTelegram.clear()
+      for (const entry of entries.slice(-50)) {
+        this.messagesFromTelegram.add(entry)
+      }
+    }
+  }
+
+  /**
+   * Check if a message originated from Telegram
+   */
+  private isMessageFromTelegram(sessionId: string, messageText: string): boolean {
+    const key = `${sessionId}:${messageText.trim()}`
+    if (this.messagesFromTelegram.has(key)) {
+      // Remove it after checking (one-time use)
+      this.messagesFromTelegram.delete(key)
+      return true
+    }
+    return false
+  }
+
   // ===========================================================================
   // Event Handling
   // ===========================================================================
@@ -134,6 +177,10 @@ export class StreamHandler {
     switch (event.type) {
       case "message.part.updated":
         await this.handlePartUpdated(sessionId, event, destination)
+        break
+
+      case "message.updated":
+        await this.handleMessageUpdated(sessionId, event, destination)
         break
 
       case "tool.execute":
@@ -176,6 +223,37 @@ export class StreamHandler {
   ): Promise<void> {
     const props = event.properties as Record<string, any>
     const part = props.part as Record<string, any>
+    const messageId = part.messageID || props.messageID
+
+    // Check if this is a user message
+    const messageRole = messageId ? this.messageRoles.get(messageId) : undefined
+    if (messageRole === "user") {
+      // For user messages, send as a separate "echo" message (once per message)
+      if (part.type === "text" && part.text && messageId && !this.sentUserMessages.has(messageId)) {
+        this.sentUserMessages.add(messageId)
+        const userText = part.text.trim()
+        if (userText) {
+          // Check if this message originated from Telegram - if so, don't echo it
+          if (this.isMessageFromTelegram(sessionId, userText)) {
+            // Message came from Telegram, no need to echo
+            return
+          }
+          
+          try {
+            // Send user message with a prefix to distinguish it (from TUI)
+            await this.sendCallback(
+              destination.chatId,
+              destination.topicId,
+              `<b>📝 From TUI:</b>\n${this.escapeHtml(userText)}`,
+              { parseMode: "HTML" }
+            )
+          } catch (error) {
+            console.error(`[StreamHandler] Failed to echo user message:`, error)
+          }
+        }
+      }
+      return // Don't process user messages as streaming state
+    }
 
     let state = this.states.get(sessionId)
     if (!state) {
@@ -183,7 +261,7 @@ export class StreamHandler {
       this.states.set(sessionId, state)
     }
 
-    state.messageId = part.messageID || props.messageID
+    state.messageId = messageId
     state.isProcessing = true
 
     // Handle text parts (type: "text")
@@ -242,6 +320,49 @@ export class StreamHandler {
           tool.completedAt = new Date()
         }
       }
+    }
+
+    // Throttled update to Telegram
+    await this.maybeUpdateTelegram(sessionId, state, destination)
+  }
+
+  /**
+   * Handle message updates (contains token info)
+   */
+  private async handleMessageUpdated(
+    sessionId: string,
+    event: SSEEvent,
+    destination: { chatId: number; topicId: number }
+  ): Promise<void> {
+    const props = event.properties as Record<string, any>
+    const info = props.info as MessageInfo | undefined
+
+    if (!info) return
+
+    // Track message role so we can filter user messages in handlePartUpdated
+    if (info.id && info.role) {
+      this.messageRoles.set(info.id, info.role)
+    }
+
+    // Skip user messages - we only want to show assistant responses
+    if (info.role === "user") {
+      return
+    }
+
+    let state = this.states.get(sessionId)
+    if (!state) {
+      state = this.createState(sessionId)
+      this.states.set(sessionId, state)
+    }
+
+    // Update token info
+    if (info.tokens) {
+      state.tokens = info.tokens
+    }
+
+    // Update model info
+    if (info.model) {
+      state.model = info.model
     }
 
     // Throttled update to Telegram
@@ -402,6 +523,25 @@ export class StreamHandler {
 
     // Clean up state
     this.states.delete(sessionId)
+    
+    // Clean up message roles and sent user messages (keep maps from growing indefinitely)
+    // We can't easily filter by session, so just clear old entries periodically
+    if (this.messageRoles.size > 100) {
+      // Keep only the most recent 50 entries
+      const entries = Array.from(this.messageRoles.entries())
+      this.messageRoles.clear()
+      for (const [key, value] of entries.slice(-50)) {
+        this.messageRoles.set(key, value)
+      }
+    }
+    if (this.sentUserMessages.size > 100) {
+      // Keep only the most recent 50 entries
+      const entries = Array.from(this.sentUserMessages)
+      this.sentUserMessages.clear()
+      for (const key of entries.slice(-50)) {
+        this.sentUserMessages.add(key)
+      }
+    }
   }
 
   /**
@@ -651,6 +791,11 @@ export class StreamHandler {
     destination: { chatId: number; topicId: number },
     force: boolean
   ): Promise<void> {
+    // Skip if we're already waiting for a message to be sent
+    if (state.pendingSend) {
+      return
+    }
+    
     const progressText = this.formatProgressMessage(state, sessionId)
     
     try {
@@ -666,14 +811,20 @@ export class StreamHandler {
           }
         )
       } else {
-        // Send new message
-        const result = await this.sendCallback(
-          destination.chatId,
-          destination.topicId,
-          progressText,
-          { parseMode: "HTML" }
-        )
-        state.telegramMessageId = result.messageId
+        // Mark that we're sending to prevent duplicate sends
+        state.pendingSend = true
+        try {
+          // Send new message
+          const result = await this.sendCallback(
+            destination.chatId,
+            destination.topicId,
+            progressText,
+            { parseMode: "HTML" }
+          )
+          state.telegramMessageId = result.messageId
+        } finally {
+          state.pendingSend = false
+        }
       }
       
       state.lastTelegramUpdateAt = new Date()
@@ -689,6 +840,8 @@ export class StreamHandler {
       // For rate limit errors, just skip this update - don't send new message
       if (errorMsg.includes('429') || errorMsg.includes('Too Many Requests')) {
         console.log(`[StreamHandler] Rate limited, skipping update`)
+        // Update the timestamp to prevent immediate retry
+        state.lastTelegramUpdateAt = new Date()
         return
       }
       
@@ -696,6 +849,7 @@ export class StreamHandler {
       // Check for "message to edit not found" or similar
       if (state.telegramMessageId && errorMsg.includes('message to edit not found')) {
         console.log(`[StreamHandler] Original message deleted, sending new one`)
+        state.telegramMessageId = undefined // Clear the old ID
         try {
           const result = await this.sendCallback(
             destination.chatId,
@@ -760,40 +914,77 @@ export class StreamHandler {
         parts.push(truncateForTelegram(htmlText, 3800))
       }
     } else {
-      // Non-streaming mode: show status and preview
-      if (runningTools.length > 0 && this.config.showToolNames) {
-        const toolName = runningTools[runningTools.length - 1].name
-        parts.push(`<b>Running:</b> <code>${this.escapeHtml(toolName)}</code>`)
-      } else if (state.isProcessing) {
-        parts.push("<b>Thinking...</b>")
-      }
-
-      // Tool count and elapsed time
-      const elapsed = Math.round((Date.now() - state.startedAt.getTime()) / 1000)
-      const toolCount = state.toolsInvoked.length
+      // Non-streaming mode: show detailed status with tokens, tools, and text
       
-      if (toolCount > 0 || elapsed > 0) {
-        const stats: string[] = []
-        if (toolCount > 0) {
-          stats.push(`${completedTools.length}/${toolCount} tools`)
-        }
-        if (elapsed > 0) {
-          stats.push(`${elapsed}s`)
-        }
-        parts.push(`<i>${stats.join(" | ")}</i>`)
+      // === Header: Status + Time + Tokens ===
+      const elapsed = Math.round((Date.now() - state.startedAt.getTime()) / 1000)
+      const headerParts: string[] = []
+      
+      // Status indicator
+      if (runningTools.length > 0) {
+        headerParts.push("⏳ Working")
+      } else if (state.isProcessing) {
+        headerParts.push("💭 Thinking")
+      } else {
+        headerParts.push("✅ Done")
       }
-
-      // Preview of current text (truncated)
+      
+      // Elapsed time
+      if (elapsed > 0) {
+        const mins = Math.floor(elapsed / 60)
+        const secs = elapsed % 60
+        headerParts.push(mins > 0 ? `${mins}m ${secs}s` : `${secs}s`)
+      }
+      
+      // Token count
+      if (state.tokens) {
+        const totalTokens = state.tokens.input + state.tokens.output
+        const tokenStr = this.formatTokenCount(totalTokens)
+        headerParts.push(`📊 ${tokenStr}`)
+      }
+      
+      parts.push(`<b>${headerParts.join(" • ")}</b>`)
+      
+      // === Tools Section ===
+      if (state.toolsInvoked.length > 0) {
+        parts.push("")
+        parts.push("<b>Tools:</b>")
+        
+        // Show all tools with status
+        for (const tool of state.toolsInvoked) {
+          const icon = tool.completedAt ? "✅" : "⏳"
+          const toolName = this.escapeHtml(tool.name)
+          
+          // Show title if available (completed tools often have a title)
+          if (tool.title) {
+            const title = this.escapeHtml(tool.title.slice(0, 50))
+            parts.push(`${icon} <code>${toolName}</code> - ${title}`)
+          } else {
+            parts.push(`${icon} <code>${toolName}</code>`)
+          }
+        }
+      }
+      
+      // === Response Text (most recent, truncated) ===
       if (state.currentText.trim()) {
-        let preview = state.currentText.trim()
-        if (preview.length > this.config.maxProgressTextLength) {
-          preview = preview.slice(0, this.config.maxProgressTextLength) + "..."
+        parts.push("")
+        parts.push("<b>Response:</b>")
+        
+        let text = state.currentText.trim()
+        
+        // Calculate available space for text
+        // Telegram limit is 4096, leave room for header/tools section
+        const headerLength = parts.join("\n").length
+        const maxTextLength = Math.max(500, 3800 - headerLength)
+        
+        if (text.length > maxTextLength) {
+          // Show the END (most recent) text with ellipsis at start
+          text = "..." + text.slice(-maxTextLength)
         }
-        // Only show preview if we have substantial content
-        if (preview.length > 20) {
-          parts.push("")
-          parts.push(`<blockquote>${this.escapeHtml(preview)}</blockquote>`)
-        }
+        
+        // Convert markdown to HTML for proper rendering
+        const htmlText = markdownToTelegramHtml(text)
+        parts.push(truncateForTelegram(htmlText, maxTextLength))
       }
     }
 
@@ -809,6 +1000,19 @@ export class StreamHandler {
       .replace(/</g, "&lt;")
       .replace(/>/g, "&gt;")
       .replace(/"/g, "&quot;")
+  }
+
+  /**
+   * Format token count for display (e.g., 1.2k, 15.3k)
+   */
+  private formatTokenCount(tokens: number): string {
+    if (tokens < 1000) {
+      return `${tokens} tokens`
+    } else if (tokens < 10000) {
+      return `${(tokens / 1000).toFixed(1)}k tokens`
+    } else {
+      return `${Math.round(tokens / 1000)}k tokens`
+    }
   }
 
   // ===========================================================================
@@ -857,6 +1061,9 @@ export class StreamHandler {
     this.sessionToTelegram.clear()
     this.sessionStreamingEnabled.clear()
     this.pendingPermissions.clear()
+    this.messageRoles.clear()
+    this.sentUserMessages.clear()
+    this.messagesFromTelegram.clear()
   }
 }
 
