@@ -66,6 +66,14 @@ export class OpenCodeInstance {
   }
   
   /**
+   * Set the session ID for this instance
+   * This is needed because the info getter returns a copy
+   */
+  setSessionId(sessionId: string): void {
+    this.instance.sessionId = sessionId
+  }
+  
+  /**
    * Get instance ID
    */
   get instanceId(): string {
@@ -340,11 +348,12 @@ export class OpenCodeInstance {
       if (result.healthy) {
         console.log(`[Instance:${id}] Health check passed (${result.responseTimeMs}ms)`)
         
-        if (result.sessionId) {
-          this.instance.sessionId = result.sessionId
-        }
+        // NOTE: We intentionally do NOT set sessionId here.
+        // The integration layer is responsible for finding/creating the correct session
+        // that matches the instance's working directory. The health check just returns
+        // the first session it finds, which may be from a different directory.
         
-        this.setState("running", { sessionId: result.sessionId })
+        this.setState("running")
         return true
       }
       
@@ -448,11 +457,10 @@ export class OpenCodeInstance {
         console.log(`[Instance:${id}] Health check failed while running`)
         this.clearTimers()
         this.setState("crashed", { error: result.error })
-      } else if (result.sessionId && result.sessionId !== this.instance.sessionId) {
-        // Session ID changed (instance was restarted externally?)
-        this.instance.sessionId = result.sessionId
-        this.onStateChange(id, "running", { sessionId: result.sessionId })
       }
+      // NOTE: We intentionally do NOT update sessionId from health checks.
+      // The integration layer is responsible for managing sessionId to ensure
+      // it matches the instance's working directory.
     }, this.config.healthCheckIntervalMs)
     
     console.log(`[Instance:${id}] Health check timer started (interval: ${this.config.healthCheckIntervalMs}ms)`)

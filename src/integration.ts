@@ -341,6 +341,10 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
 
         // Track session → instance mapping
         sessionToInstance.set(sessionId, event.instanceId)
+        
+        // Update the instance's sessionId in the orchestrator
+        // This is important so that createTopicWithInstance can wait for it
+        instanceManager.updateSessionId(event.instanceId, sessionId)
 
         // Update instance with session ID
         const instance = instanceManager.getInstance(event.instanceId)
@@ -1212,6 +1216,11 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
 
       const topicId = newTopic.message_thread_id
 
+      // Create a placeholder mapping IMMEDIATELY to prevent the forum_topic_created
+      // event handler from creating a duplicate mapping with a pending session
+      topicStore.createMapping(chatId, topicId, topicName, `pending_${Date.now()}`, {})
+      topicStore.updateWorkDir(chatId, topicId, workDir)
+
       // Start OpenCode instance for this topic
       const instance = await instanceManager.getOrCreateInstance(topicId, workDir, {
         name: topicName,
@@ -1225,11 +1234,13 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
       }
 
       // Wait for instance to be ready (up to 30 seconds)
+      // The instance:ready event handler runs asynchronously and sets the sessionId
       const startTime = Date.now()
       let sessionId: string | undefined
+      const instanceId = instance.config.instanceId
       
       while (Date.now() - startTime < 30000) {
-        const current = instanceManager.getInstance(instance.config.instanceId)
+        const current = instanceManager.getInstance(instanceId)
         if (current?.state === "running" && current.sessionId) {
           sessionId = current.sessionId
           break
@@ -1250,7 +1261,9 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
         }
       }
 
-      // Create topic mapping
+      // Update the placeholder mapping with the real session ID
+      // We need to delete and recreate because there's no updateSessionId method
+      topicStore.deleteMapping(chatId, topicId)
       topicStore.createMapping(chatId, topicId, topicName, sessionId, {})
       topicStore.updateWorkDir(chatId, topicId, workDir)
       topicStore.toggleStreaming(chatId, topicId, true) // Enable streaming by default

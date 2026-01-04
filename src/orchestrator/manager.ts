@@ -358,6 +358,21 @@ export class InstanceManager {
   }
   
   /**
+   * Update the session ID for an instance
+   * Called by integration layer after determining the correct session
+   */
+  updateSessionId(instanceId: string, sessionId: string): void {
+    const instance = this.instances.get(instanceId)
+    if (instance) {
+      instance.setSessionId(sessionId)
+      this.stateStore.updateSessionId(instanceId, sessionId)
+      console.log(`[Manager] Updated instance ${instanceId} sessionId to ${sessionId}`)
+    } else {
+      console.log(`[Manager] WARNING: Instance ${instanceId} not found for sessionId update!`)
+    }
+  }
+  
+  /**
    * Record activity by topic
    */
   recordActivityByTopic(topicId: number): void {
