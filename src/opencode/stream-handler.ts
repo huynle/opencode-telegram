@@ -507,8 +507,52 @@ export class StreamHandler {
           } catch {
             // Give up
           }
+        } else if (errorMsg.includes('429') || errorMsg.includes('Too Many Requests') || errorMsg.includes('Rate limited')) {
+          // Rate limited - wait and retry the final response (it's important!)
+          const retryMatch = errorMsg.match(/retry after (\d+)/)
+          const retryAfter = retryMatch ? parseInt(retryMatch[1], 10) * 1000 : 5000
+          console.log(`[StreamHandler] Rate limited on final response, waiting ${retryAfter}ms to retry`)
+          
+          // Wait for rate limit to expire, then retry
+          await new Promise(resolve => setTimeout(resolve, retryAfter + 500))
+          
+          try {
+            if (state.telegramMessageId) {
+              await this.sendCallback(
+                destination.chatId,
+                destination.topicId,
+                finalContent,
+                { 
+                  parseMode: "HTML",
+                  editMessageId: state.telegramMessageId,
+                }
+              )
+              console.log(`[StreamHandler] Final response sent after rate limit wait`)
+            } else {
+              await this.sendCallback(
+                destination.chatId,
+                destination.topicId,
+                finalContent,
+                { parseMode: "HTML" }
+              )
+              console.log(`[StreamHandler] Final response sent as new message after rate limit wait`)
+            }
+          } catch (retryError) {
+            // If retry also fails, try sending as a new message
+            console.log(`[StreamHandler] Retry failed, sending final response as new message`)
+            try {
+              await this.sendCallback(
+                destination.chatId,
+                destination.topicId,
+                finalContent,
+                { parseMode: "HTML" }
+              )
+            } catch {
+              console.error(`[StreamHandler] Failed to send final response even after retry`)
+            }
+          }
         } else {
-          // For other errors (rate limit, etc.), just log - the progress message already has content
+          // For other errors, just log - the progress message already has content
           console.log(`[StreamHandler] Final edit failed (${errorMsg.slice(0, 80)}), keeping progress message`)
         }
       }
