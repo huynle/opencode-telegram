@@ -307,13 +307,36 @@ export async function createIntegratedApp(config: AppConfig): Promise<Integrated
         })
         clients.set(event.instanceId, client)
 
-        // Get or create session
-        const sessions = await client.listSessions()
-        let sessionId = sessions[0]?.id
+        // Get the instance to find its working directory
+        const instanceInfo = instanceManager.getInstance(event.instanceId)
+        const instanceWorkDir = instanceInfo?.config.workDir
 
+        // Get or create session - MUST match the instance's working directory
+        const sessions = await client.listSessions()
+        
+        // Find a session that matches this instance's working directory
+        // Sessions have a 'directory' field that indicates where they were created
+        let sessionId: string | undefined
+        
+        if (instanceWorkDir) {
+          // Look for a session in the same directory
+          const matchingSession = sessions.find((s: any) => 
+            s.directory === instanceWorkDir
+          )
+          sessionId = matchingSession?.id
+          
+          if (matchingSession) {
+            console.log(`[Integration] Found existing session ${sessionId} for directory ${instanceWorkDir}`)
+          } else {
+            console.log(`[Integration] No session found for directory ${instanceWorkDir}, creating new one`)
+          }
+        }
+
+        // If no matching session found, create a new one
         if (!sessionId) {
           const session = await client.createSession()
           sessionId = session.id
+          console.log(`[Integration] Created new session ${sessionId}`)
         }
 
         // Track session → instance mapping
