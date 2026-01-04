@@ -8,7 +8,7 @@
  * - Route messages to the correct OpenCode sessions
  */
 
-import { Bot, Composer, Context, Filter } from "grammy"
+import { Bot, Composer, Context, Filter, InlineKeyboard } from "grammy"
 import type { ForumMessageContext } from "../../types/forum"
 import type { TopicManager } from "../../forum/topic-manager"
 
@@ -437,6 +437,8 @@ export interface ActiveSessionInfo {
   isExternal: boolean
   /** Whether this was discovered (not managed or registered) */
   isDiscovered?: boolean
+  /** Whether this is a TUI instance (vs opencode serve) */
+  isTui?: boolean
   /** Port number */
   port?: number
   /** Last activity timestamp */
@@ -590,10 +592,35 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
 
       // Legend
       lines.push("_Icons: 📦 managed | 🔗 external | 🔍 discovered_")
-      lines.push("")
-      lines.push("*Commands:*")
-      lines.push("`/connect <#>` - Link session to new topic")
-      lines.push("`/disconnect` - Unlink current topic (run in topic)")
+
+      // Build inline keyboard with connect buttons
+      // Only show buttons for sessions not already linked to a topic
+      const keyboard = new InlineKeyboard()
+      const unlinkedSessions = sessions
+        .map((s, i) => ({ session: s, index: i + 1 }))
+        .filter(({ session }) => !session.topicId)
+      
+      // Add buttons - one per row since names can be long
+      for (let i = 0; i < unlinkedSessions.length; i++) {
+        const { session, index } = unlinkedSessions[i]
+        const projectName = session.directory.split("/").pop() || "project"
+        const sessionTitle = session.name || ""
+        
+        // Format: "<project>-<session title>" or just "<project>" if no title
+        let fullName = sessionTitle && sessionTitle !== projectName
+          ? `${projectName}-${sessionTitle}`
+          : projectName
+        
+        // Truncate to fit Telegram button limits (max ~64 chars for button text)
+        const maxLen = 50
+        if (fullName.length > maxLen) {
+          fullName = fullName.slice(0, maxLen - 3) + "..."
+        }
+        
+        const buttonText = `${index}. ${fullName}`
+        keyboard.text(buttonText, `connect:${index}`)
+        keyboard.row()
+      }
 
       // Safety check: Telegram has 4096 char limit
       let message = lines.join("\n")
@@ -602,7 +629,17 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
         message = message.slice(0, 3900) + "\n\n_...truncated (too many sessions)_"
       }
 
-      return ctx.reply(message, { parse_mode: "Markdown" })
+      // Only add keyboard if there are unlinked sessions
+      if (unlinkedSessions.length > 0) {
+        return ctx.reply(message, { 
+          parse_mode: "Markdown",
+          reply_markup: keyboard
+        })
+      } else {
+        lines.push("")
+        lines.push("_All sessions are linked to topics._")
+        return ctx.reply(lines.join("\n"), { parse_mode: "Markdown" })
+      }
     } catch (error) {
       console.error("[ForumCommands] Error listing sessions:", error)
       return ctx.reply(`Error listing sessions: ${error instanceof Error ? error.message : String(error)}`)
@@ -773,6 +810,152 @@ export function createForumCommands(topicManagerOrOptions: TopicManager | ForumC
     } catch (error) {
       console.error("[ForumCommands] Error connecting to session:", error)
       return ctx.reply(`Error: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  })
+
+  /**
+   * Callback query handler for connect buttons from /sessions
+   */
+  composer.callbackQuery(/^connect:(\d+)$/, async (ctx) => {
+    const match = ctx.callbackQuery.data.match(/^connect:(\d+)$/)
+    if (!match) {
+      await ctx.answerCallbackQuery({ text: "Invalid button" })
+      return
+    }
+
+    const num = parseInt(match[1], 10)
+    
+    if (!connectToSession || !getActiveSessions) {
+      await ctx.answerCallbackQuery({ text: "Connection not available" })
+      return
+    }
+
+    // Refresh session list if empty or stale
+    if (lastSessionList.length === 0) {
+      lastSessionList = await getActiveSessions()
+    }
+
+    if (num < 1 || num > lastSessionList.length) {
+      await ctx.answerCallbackQuery({ 
+        text: `Session #${num} not found. List may be stale - run /sessions again.`,
+        show_alert: true
+      })
+      return
+    }
+
+    const session = lastSessionList[num - 1]
+    
+    // Check if already linked
+    if (session.topicId) {
+      await ctx.answerCallbackQuery({ 
+        text: "This session is already linked to a topic.",
+        show_alert: true
+      })
+      return
+    }
+
+    const projectName = session.directory.split("/").pop() || session.name
+    
+    // Answer callback to show we're processing
+    await ctx.answerCallbackQuery({ text: `Connecting to ${projectName}...` })
+
+    try {
+      const chatId = ctx.callbackQuery.message?.chat.id
+      if (!chatId) {
+        await ctx.reply("Error: Could not determine chat ID")
+        return
+      }
+
+      const result = await connectToSession(chatId, session.sessionId)
+
+      if (!result.success) {
+        await ctx.reply(
+          `❌ *Connection Failed*\n\n${result.error}`,
+          { parse_mode: "Markdown" }
+        )
+        return
+      }
+
+      // Edit the original message to show success and update buttons
+      const newSessions = await getActiveSessions()
+      lastSessionList = newSessions
+      
+      // Rebuild the sessions list message
+      const lines: string[] = []
+      lines.push(`*Active Sessions (${newSessions.length})*`)
+      lines.push("")
+
+      let index = 1
+      for (const s of newSessions) {
+        const statusIcon = s.status === "running" ? "🟢" : s.status === "idle" ? "🟡" : "⚪"
+        const sessionProjectName = s.directory.split("/").pop() || s.name
+        const sessionTitle = s.name !== sessionProjectName ? ` _(${s.name})_` : ""
+        const linkedIcon = s.topicId ? " 🔗" : ""
+        const typeIcon = s.isDiscovered ? "🔍" : s.isExternal ? "🔗" : "📦"
+        
+        lines.push(`*${index}.* ${statusIcon} ${typeIcon} *${sessionProjectName}*${sessionTitle}${linkedIcon}`)
+        lines.push(`    📁 \`${s.directory}\``)
+        if (s.port) {
+          lines.push(`    🔌 Port ${s.port}`)
+        }
+        index++
+      }
+      lines.push("")
+      lines.push("_Icons: 📦 managed | 🔗 external | 🔍 discovered_")
+
+      // Rebuild keyboard for remaining unlinked sessions
+      const keyboard = new InlineKeyboard()
+      const unlinkedSessions = newSessions
+        .map((s, i) => ({ session: s, index: i + 1 }))
+        .filter(({ session: s }) => !s.topicId)
+
+      for (let i = 0; i < unlinkedSessions.length; i++) {
+        const { session: s, index: idx } = unlinkedSessions[i]
+        const btnProjectName = s.directory.split("/").pop() || "project"
+        const btnSessionTitle = s.name || ""
+        
+        // Format: "<project>-<session title>" or just "<project>" if no title
+        let fullName = btnSessionTitle && btnSessionTitle !== btnProjectName
+          ? `${btnProjectName}-${btnSessionTitle}`
+          : btnProjectName
+        
+        // Truncate to fit Telegram button limits
+        const maxLen = 50
+        if (fullName.length > maxLen) {
+          fullName = fullName.slice(0, maxLen - 3) + "..."
+        }
+        
+        const buttonText = `${idx}. ${fullName}`
+        keyboard.text(buttonText, `connect:${idx}`)
+        keyboard.row()
+      }
+
+      // Update the original message
+      if (unlinkedSessions.length > 0) {
+        await ctx.editMessageText(lines.join("\n"), { 
+          parse_mode: "Markdown",
+          reply_markup: keyboard
+        })
+      } else {
+        lines.push("")
+        lines.push("_All sessions are linked to topics._")
+        await ctx.editMessageText(lines.join("\n"), { parse_mode: "Markdown" })
+      }
+
+      // Send success message with link
+      await ctx.reply(
+        `✅ *Connected to ${projectName}!*\n\n` +
+        (result.topicUrl 
+          ? `[Open Topic](${result.topicUrl})`
+          : `Topic ID: ${result.topicId}`),
+        { 
+          parse_mode: "Markdown",
+          link_preview_options: { is_disabled: true }
+        }
+      )
+    } catch (error) {
+      console.error("[ForumCommands] Error connecting via button:", error)
+      await ctx.reply(`Error: ${error instanceof Error ? error.message : String(error)}`)
     }
   })
 
