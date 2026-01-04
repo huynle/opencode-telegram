@@ -1,0 +1,41 @@
+# Dependencies
+node_modules
+
+# Build output
+dist
+
+# Data directories (will be mounted as volumes)
+data
+
+# Git
+.git
+.gitignore
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+
+# Environment files (should be passed via docker run or compose)
+.env
+.env.*
+!.env.example
+
+# Documentation
+*.md
+!README.md
+
+# Logs
+*.log
+logs
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test files
+*.test.ts
+*.spec.ts
+__tests__
+coverage

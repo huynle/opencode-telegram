@@ -19,6 +19,7 @@ A Telegram bot that orchestrates multiple [OpenCode](https://opencode.ai) instan
 ## Table of Contents
 
 - [Quick Start](#quick-start)
+- [Running with Docker](#running-with-docker)
 - [Usage](#usage)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -81,6 +82,144 @@ bun run dev
 bun run start
 ```
 
+## Running with Docker
+
+> **Important**: Running natively with Bun is recommended for full functionality. Docker has significant limitations for this project's use case.
+
+### Why Native is Recommended
+
+The bot's session discovery feature uses `ps` and `lsof` to find OpenCode instances running on your machine. Docker containers have isolated process namespaces, meaning **the bot cannot discover OpenCode sessions running on your host**.
+
+| Feature | Native (Bun) | Docker | Docker + `--pid=host` |
+|---------|--------------|--------|----------------------|
+| `/new` - create managed instances | Works | Works | Works |
+| `/sessions` - discover host sessions | Works | **No** | Linux only |
+| `/connect` - attach to discovered sessions | Works | **No** | Linux only |
+| External API registration | Works | Works | Works |
+| Stream responses to Telegram | Works | Works | Works |
+
+### When Docker Makes Sense
+
+- You only need **managed instances** (created via `/new` command)
+- You're on Linux and can use `--pid=host`
+- You want to use the **External API** to manually register instances
+
+### Build the Image
+
+```bash
+docker build -t opencode-telegram .
+```
+
+### Option 1: Managed Instances Only
+
+If you only use `/new` to create instances (no discovery of external sessions):
+
+```bash
+docker run -d --name opencode-telegram \
+  --network=host \
+  -v $(pwd)/data:/app/data \
+  -v ~/oc-bot:/root/oc-bot \
+  --env-file .env \
+  opencode-telegram
+```
+
+**Volume Mounts:**
+| Mount | Purpose |
+|-------|---------|
+| `./data:/app/data` | SQLite databases for persistent state |
+| `~/oc-bot:/root/oc-bot` | Project directories created by `/new` command |
+
+### Option 2: With Discovery (Linux Only)
+
+On Linux, you can share the host's process namespace to enable discovery:
+
+```bash
+docker run -d --name opencode-telegram \
+  --network=host \
+  --pid=host \
+  -v $(pwd)/data:/app/data \
+  -v ~/oc-bot:/root/oc-bot \
+  --env-file .env \
+  opencode-telegram
+```
+
+> **Warning**: `--pid=host` shares the host's process namespace with the container. The container can see all host processes.
+
+### Option 3: External API Registration
+
+Run the bot in Docker and manually register OpenCode instances via the API:
+
+```bash
+# Start the bot
+docker run -d --name opencode-telegram \
+  --network=host \
+  -v $(pwd)/data:/app/data \
+  -v ~/oc-bot:/root/oc-bot \
+  --env-file .env \
+  opencode-telegram
+
+# Register an OpenCode instance running on the host
+curl -X POST http://localhost:4200/api/register \
+  -H "Content-Type: application/json" \
+  -d '{
+    "projectPath": "/path/to/project",
+    "projectName": "my-project", 
+    "opencodePort": 4096,
+    "sessionId": "ses_abc123"
+  }'
+```
+
+### macOS/Windows Note
+
+On macOS and Windows, Docker Desktop runs containers in a Linux VM:
+- `--network=host` doesn't provide true host networking
+- `--pid=host` is not available
+- **Discovery will not work** - use native Bun or the External API
+
+### Docker Compose
+
+```yaml
+version: '3.8'
+
+services:
+  opencode-telegram:
+    build: .
+    container_name: opencode-telegram
+    network_mode: host
+    # Uncomment for discovery (Linux only):
+    # pid: host
+    volumes:
+      - ./data:/app/data
+      - ~/oc-bot:/root/oc-bot
+    env_file:
+      - .env
+    restart: unless-stopped
+```
+
+```bash
+docker compose up -d
+docker compose logs -f
+```
+
+### Useful Docker Commands
+
+```bash
+# View logs
+docker logs -f opencode-telegram
+
+# Check container status
+docker ps -a --filter name=opencode-telegram
+
+# Stop the bot
+docker stop opencode-telegram
+
+# Remove container
+docker rm opencode-telegram
+
+# Rebuild after code changes
+docker build -t opencode-telegram . && docker compose up -d
+```
+
 ## Usage
 
 ### General Topic Commands (Control Plane)
@@ -119,6 +258,8 @@ The bot can discover any running OpenCode instance on your machine:
 ```
 
 Discovered sessions show with a magnifying glass icon in `/sessions` output.
+
+> **Note**: Discovery requires the bot to run natively (not in Docker) or with `--pid=host` on Linux. See [Running with Docker](#running-with-docker) for details.
 
 ### Topic Naming Convention
 
@@ -206,7 +347,7 @@ See [.env.example](.env.example) for all available options.
 
 ### External Instance API
 
-The bot exposes an API for external OpenCode instances to register:
+The bot exposes an API on port 4200 for external OpenCode instances to register. This is useful when running the bot in Docker without process discovery.
 
 ```bash
 # Register an external instance
@@ -229,6 +370,9 @@ curl http://localhost:4200/api/status/$(echo -n "/path/to/project" | base64)
 
 # List all instances
 curl http://localhost:4200/api/instances
+
+# Health check
+curl http://localhost:4200/api/health
 ```
 
 ### OpenCode REST API (per instance)
@@ -298,6 +442,17 @@ lsof -ti:4100 | xargs kill
 **Symptom**: SSE events received but not forwarded to Telegram
 
 **Solution**: Check that the topic is properly linked with `/session` command
+
+### Discovery Not Working in Docker
+
+**Symptom**: `/sessions` only shows managed instances, not host OpenCode sessions
+
+**Cause**: Docker containers have isolated process namespaces - `ps` and `lsof` can only see container processes
+
+**Solutions** (in order of recommendation):
+1. **Run natively**: `bun run start` (recommended)
+2. **Linux with `--pid=host`**: Shares host process namespace
+3. **External API**: Manually register instances via `/api/register`
 
 ## Contributing
 
